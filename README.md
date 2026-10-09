@@ -37,6 +37,8 @@ wrong, and (optionally) what to press next.
 - **Weak keys mode.** Words weighted toward the letters you're slowest or least accurate on.
 - **Words mode.** Random common English words.
 - **Instant death.** Optional: the first wrong key ends the test.
+- **Results graph.** WPM (with per-second raw) or accuracy over the course of the test, with mistakes marked;
+  step through it second by second to read the exact values.
 - Works without the board too: if no Voyager is connected you get a plain typing test (and a note that your
   Voyager is missing).
 
@@ -63,7 +65,7 @@ After that it only fetches again when you flash a new revision.
 | Where | Keys |
 | --- | --- |
 | Typing | type to start · `tab` new test · `esc` settings · `ctrl+w` / `alt+backspace` delete word · `ctrl+c` quit |
-| Results | `tab` / `enter` next test · `r` retry same text · `esc` settings · `q` quit |
+| Results | `tab` / `enter` next test · `r` retry same text · `←→` / `h l` move the graph cursor (`home` / `end` jump) · `↑↓` / `j k` switch wpm / accuracy graph · `esc` settings · `q` quit |
 | Settings | `↑↓` / `j k` move · type a setting's name to jump to it · `enter` change · `←→` adjust · `esc` close |
 | Layout editor | arrows or press a key on the board to select · `enter` change key · `del` undo change · `tab` next layer · `ctrl+s` save · `esc` cancel |
 

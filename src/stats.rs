@@ -272,7 +272,7 @@ mod tests {
         s.ensure_started(&p);
         let t = Targets { wpm: 30.0, accuracy: 0.95 };
         assert_eq!(s.maybe_unlock(&p, t), None);
-        let fast = Keystroke { expected: 'x', correct: true, interval: Some(Duration::from_millis(200)) };
+        let fast = Keystroke { expected: 'x', correct: true, interval: Some(Duration::from_millis(200)), at: Duration::ZERO };
         let ks: Vec<Keystroke> = s
             .unlocked
             .iter()
@@ -288,7 +288,7 @@ mod tests {
         let layout = gallium();
         let mut s = Stats::default();
         s.sync_layout(&layout);
-        let k = Keystroke { expected: 'n', correct: true, interval: Some(Duration::from_millis(300)) };
+        let k = Keystroke { expected: 'n', correct: true, interval: Some(Duration::from_millis(300)), at: Duration::ZERO };
         s.record(&[k.clone(), k], &layout);
         assert_eq!(s.letter('n').samples, 2);
         let moved = layout.clone().with_edits(&[crate::layout::Edit { layer: 0, key: 13, value: crate::layout::Key::tap("KC_Q") }, crate::layout::Edit { layer: 0, key: 20, value: crate::layout::Key::tap("KC_N") }]);

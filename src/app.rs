@@ -18,7 +18,7 @@ use crate::layout::{Action, Edit, Key, Layout, Press};
 use crate::oryx;
 use crate::stats::{Progression, Stats, Targets};
 use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE, WORD_COUNT_RANGE};
-use crate::typing::TypingTest;
+use crate::typing::{Second, TypingTest};
 use crate::ui;
 
 pub const SETTINGS_ITEMS: [&str; 11] = [
@@ -180,9 +180,31 @@ impl Editor {
     }
 }
 
+/// Which graph the results screen shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChartView {
+    Wpm,
+    Accuracy,
+}
+
+/// The results screen: the test's per-second timeline and where the graph cursor is.
+pub struct ResultsView {
+    pub chart: ChartView,
+    /// Index into `timeline` the cursor is on.
+    pub cursor: usize,
+    pub timeline: Vec<Second>,
+}
+
+impl ResultsView {
+    fn new(timeline: Vec<Second>) -> Self {
+        let cursor = timeline.len().saturating_sub(1);
+        ResultsView { chart: ChartView::Wpm, cursor, timeline }
+    }
+}
+
 pub enum Screen {
     Typing,
-    Results,
+    Results(ResultsView),
     Settings(SettingsMenu),
     Editor(Box<Editor>),
 }
@@ -298,7 +320,7 @@ impl App {
         if self.notice.as_ref().is_some_and(|(_, until)| *until <= now) {
             self.notice = None;
         }
-        if !self.test.in_progress() && matches!(self.screen, Screen::Typing | Screen::Results)
+        if !self.test.in_progress() && matches!(self.screen, Screen::Typing | Screen::Results(_))
             && let Some(ed) = self.pending_editor.take() {
                 self.screen = Screen::Editor(Box::new(ed));
             }
@@ -470,7 +492,7 @@ impl App {
         }
         match self.screen {
             Screen::Typing => self.on_typing_key(key),
-            Screen::Results => self.on_results_key(key),
+            Screen::Results(_) => self.on_results_key(key),
             Screen::Settings(_) => self.on_settings_key(key),
             Screen::Editor(_) => self.on_editor_key(key),
         }
@@ -520,7 +542,7 @@ impl App {
     }
 
     fn finish_test(&mut self) {
-        self.screen = Screen::Results;
+        self.screen = Screen::Results(ResultsView::new(self.test.timeline()));
         let Some(layout) = &self.layout else { return };
         self.stats.record(&self.test.keystrokes_log, layout);
         // A failed (instant death) test still counts toward letter stats, but never unlocks.
@@ -598,7 +620,20 @@ impl App {
     }
 
     fn on_results_key(&mut self, key: KeyEvent) {
+        let Screen::Results(view) = &mut self.screen else { return };
+        let last = view.timeline.len().saturating_sub(1);
         match key.code {
+            // Graph: move the cursor through the test, switch between wpm and accuracy.
+            KeyCode::Left | KeyCode::Char('h') => view.cursor = view.cursor.saturating_sub(1),
+            KeyCode::Right | KeyCode::Char('l') => view.cursor = (view.cursor + 1).min(last),
+            KeyCode::Home => view.cursor = 0,
+            KeyCode::End => view.cursor = last,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('j') | KeyCode::Char('v') => {
+                view.chart = match view.chart {
+                    ChartView::Wpm => ChartView::Accuracy,
+                    ChartView::Accuracy => ChartView::Wpm,
+                };
+            }
             KeyCode::Tab | KeyCode::Enter => self.new_test(),
             KeyCode::Char('r') => {
                 self.test = self.test.restart();

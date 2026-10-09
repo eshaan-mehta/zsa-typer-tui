@@ -8,7 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{find_setting, number_field, App, DeviceState, Editor, EditorPurpose, Screen, SettingsMenu, SETTINGS_ITEMS};
+use crate::app::{
+    find_setting, number_field, App, ChartView, DeviceState, Editor, EditorPurpose, ResultsView, Screen, SettingsMenu,
+    SETTINGS_ITEMS,
+};
 use crate::board::{Board, HintRole, KeyVisual, Marker, Scale};
 use crate::geometry::KEY_COUNT;
 use crate::layout::{Layout, Press};
@@ -25,10 +28,10 @@ fn dim() -> Style {
 
 pub fn draw(f: &mut Frame, app: &App) {
     match &app.screen {
-        Screen::Typing => draw_typing(f, app),
-        Screen::Results => draw_results(f, app),
+        Screen::Typing => draw_typing(f, app, "tab new test · esc settings"),
+        Screen::Results(view) => draw_results(f, app, view),
         Screen::Settings(menu) => {
-            draw_typing(f, app);
+            draw_typing(f, app, settings_actions(menu));
             draw_settings(f, app, menu);
         }
         Screen::Editor(ed) => draw_editor(f, app, ed),
@@ -67,10 +70,26 @@ fn status_line(app: &App) -> Line<'static> {
     }
 }
 
-fn footer(app: &App, help: &str) -> Line<'static> {
-    match app.notice() {
-        Some(n) => Line::styled(n.to_string(), Style::new().fg(theme::ACCENT)),
-        None => Line::styled(help.to_string(), dim()),
+/// Lines at the bottom of every screen: a notice (when there is one), then the actions.
+const BOTTOM_H: u16 = 2;
+
+/// The bottom of every screen: notices on their own line, and the keys you can press on the
+/// last line, so actions are always in the same place.
+fn draw_bottom(f: &mut Frame, app: &App, area: Rect, actions: &str) {
+    let [notice, keys] = Split::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    if let Some(n) = app.notice() {
+        f.render_widget(Paragraph::new(Line::styled(n.to_string(), Style::new().fg(theme::ACCENT))).alignment(Alignment::Center), notice);
+    }
+    f.render_widget(Paragraph::new(Line::styled(actions.to_string(), dim())).alignment(Alignment::Center), keys);
+}
+
+/// What can be pressed in the settings menu right now.
+fn settings_actions(menu: &SettingsMenu) -> &'static str {
+    match &menu.editing {
+        Some(entry) if entry.is_path => "enter load · esc cancel",
+        Some(_) => "enter save · esc cancel",
+        None if !menu.search.is_empty() => "↑↓/jk move · enter change · ←→ adjust · esc clear search",
+        None => "↑↓/jk move · type to jump · enter change · ←→ adjust · esc close",
     }
 }
 
@@ -178,7 +197,7 @@ fn text_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 const BOARD_LIFT: u16 = 6;
 
 /// Space left for the board after the fixed rows on the typing screen.
-const TYPING_CHROME: u16 = 1 + 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + 1 + 1 + 1;
+const TYPING_CHROME: u16 = 1 + 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + 1 + 1 + BOTTOM_H;
 
 /// What the current mode is working on: the letter strip in progressive mode, weak letters otherwise.
 fn mode_line(app: &App) -> Line<'static> {
@@ -230,7 +249,7 @@ fn mode_line(app: &App) -> Line<'static> {
 
 // ----- screens -----
 
-fn draw_typing(f: &mut Frame, app: &App) {
+fn draw_typing(f: &mut Frame, app: &App, actions: &str) {
     let area = f.area();
     let show_board = app.device.is_connected();
     let scale = if show_board { Scale::fit(area.width, area.height.saturating_sub(TYPING_CHROME)) } else { None };
@@ -240,13 +259,13 @@ fn draw_typing(f: &mut Frame, app: &App) {
     // Spare height: half above the text; the rest goes between the text and the board and
     // below the board, with the board lifted BOARD_LIFT lines off where a 5:3 split would
     // put it. Keeps the test clearly separated without pinning the keyboard to the bottom.
-    let fixed = 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + board_h + 1;
+    let fixed = 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + board_h + 1 + BOTTOM_H;
     let spare = area.height.saturating_sub(fixed);
     let above_text = spare / 2;
     // (Rounded, and always leaving a line between the text and the board.)
     let below_board = ((spare * 3 + 8) / 16 + BOARD_LIFT).min((spare - above_text).saturating_sub(1));
     let above_board = spare - above_text - below_board;
-    let [status, _, mode, stats, _, text, _, caption, board, _, foot] = Split::vertical([
+    let [status, _, mode, stats, _, text, _, caption, board, _, foot, _] = Split::vertical([
         Constraint::Length(1),
         Constraint::Length(above_text),
         Constraint::Length(1),
@@ -257,18 +276,28 @@ fn draw_typing(f: &mut Frame, app: &App) {
         Constraint::Length(above_board),
         Constraint::Length(1),
         Constraint::Length(board_h),
-        Constraint::Length(below_board),
+        // Actions sit just under the keyboard (not at the screen's bottom edge on tall
+        // terminals); the leftover space goes below them.
         Constraint::Length(1),
+        Constraint::Length(BOTTOM_H),
+        Constraint::Length(below_board),
     ])
     .areas(area);
 
     f.render_widget(Paragraph::new(status_line(app)).alignment(Alignment::Center), status);
 
     let t = &app.test;
+    // Before a test: how it's set up. During: live numbers.
     let stats_text = if t.is_started() {
         format!("{:.0} wpm   {:.0}%   {}/{}", t.wpm(), t.accuracy(), t.words_done(), t.word_count)
     } else {
-        format!("{} words · start typing", t.word_count)
+        let s = &app.store.saved.settings;
+        let mut parts = vec![s.mode.name().to_string(), format!("{} words", t.word_count)];
+        parts.push(if s.hints { "hints on" } else { "hints off" }.to_string());
+        if s.instant_death {
+            parts.push("instant death".to_string());
+        }
+        parts.join(" · ")
     };
     let text_area = centered(text, text_w + 1);
     // What this mode is working on, shown before a test starts; hidden while typing.
@@ -304,29 +333,39 @@ fn draw_typing(f: &mut Frame, app: &App) {
         }
     }
 
-    let hints = if app.hints_on() { "on" } else { "off" };
-    let settings = &app.store.saved.settings;
-    let death = if settings.instant_death { " · instant death" } else { "" };
-    let help = format!("{}{death} · tab new test · esc settings · hints {hints}", settings.mode.name());
-    f.render_widget(Paragraph::new(footer(app, &help)).alignment(Alignment::Center), foot);
+    draw_bottom(f, app, foot, actions);
 }
 
-fn draw_results(f: &mut Frame, app: &App) {
+/// Height of the results graph, including its axis labels.
+const CHART_H: u16 = 11;
+/// Widest the results graph gets.
+const CHART_MAX_W: u16 = 100;
+
+fn draw_results(f: &mut Frame, app: &App, view: &ResultsView) {
     let area = f.area();
     let t = &app.test;
+    // Status, summary, gap, graph header, graph, gap, footer; the board only if it still fits.
+    let fixed = 1 + 7 + 1 + 1 + CHART_H + 1 + 1 + BOTTOM_H;
     let show_board = app.device.is_connected() && app.layout.is_some();
-    let scale = if show_board { Scale::fit(area.width, area.height.saturating_sub(14)) } else { None };
+    let scale = if show_board { Scale::fit(area.width, area.height.saturating_sub(fixed + 2)) } else { None };
 
-    let [status, _, summary, _, board, _, foot] = Split::vertical([
+    // After a test the next step matters more than the keyboard, so the actions sit right
+    // under the graph (where the eyes are) and the board goes below them.
+    let [status, _, summary, _, chart_head, chart, foot, _, board, _] = Split::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(7),
         Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(CHART_H),
+        Constraint::Length(BOTTOM_H),
+        Constraint::Length(1),
         Constraint::Length(scale.map_or(0, |s| s.height())),
         Constraint::Fill(1),
-        Constraint::Length(1),
     ])
     .areas(area);
+    let chart_w = CHART_MAX_W.min(area.width.saturating_sub(4));
+    draw_chart(f, view, centered(chart_head, chart_w), centered(chart, chart_w));
 
     f.render_widget(Paragraph::new(status_line(app)).alignment(Alignment::Center), status);
 
@@ -389,10 +428,197 @@ fn draw_results(f: &mut Frame, app: &App) {
         f.render_widget(Board { keys: &keys, scale }, board);
     }
 
-    f.render_widget(
-        Paragraph::new(footer(app, "tab next test · r retry · esc settings · q quit")).alignment(Alignment::Center),
-        foot,
-    );
+    draw_bottom(f, app, foot, "tab next test · r retry · ←→/hl inspect · ↑↓/jk wpm/accuracy · esc settings · q quit");
+}
+
+/// The results graph: running wpm and per-second raw (or running accuracy), red dots where
+/// mistakes happened, and a cursor with the values at that second.
+fn draw_chart(f: &mut Frame, view: &ResultsView, head: Rect, area: Rect) {
+    let tl = &view.timeline;
+    if tl.len() < 2 {
+        f.render_widget(Paragraph::new(Line::styled("too short to graph", dim())).alignment(Alignment::Center), head);
+        return;
+    }
+    let accent = Style::new().fg(theme::ACCENT);
+    let raw_style = Style::new().fg(Color::DarkGray);
+    let errors_style = Style::new().fg(theme::MISTAKE);
+    let cur = &tl[view.cursor.min(tl.len() - 1)];
+
+    // Header: which graph (the other one dim), then the values under the cursor.
+    let tab = |name: &'static str, on: bool| {
+        Span::styled(name, if on { accent.bold().underlined() } else { dim() })
+    };
+    let secs = fmt_secs(cur.t);
+    let mut spans = vec![
+        tab("wpm", view.chart == ChartView::Wpm),
+        Span::raw("  "),
+        tab("accuracy", view.chart == ChartView::Accuracy),
+        Span::raw("      "),
+        Span::styled(secs, Style::new().bold()),
+        Span::raw("  "),
+    ];
+    match view.chart {
+        ChartView::Wpm => spans.extend([
+            Span::styled("wpm ", dim()),
+            Span::styled(format!("{:.0}", cur.wpm), accent.bold()),
+            Span::styled("  raw ", dim()),
+            Span::styled(format!("{:.0}", cur.raw), Style::new().bold()),
+        ]),
+        ChartView::Accuracy => spans.extend([
+            Span::styled("accuracy ", dim()),
+            Span::styled(format!("{:.0}%", cur.accuracy), accent.bold()),
+        ]),
+    }
+    spans.push(Span::styled("  errors ", dim()));
+    spans.push(Span::styled(cur.errors.to_string(), if cur.errors > 0 { errors_style.bold() } else { Style::new().bold() }));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), head);
+
+    // Series for the chosen graph, and its y range.
+    let main: Vec<(f64, f64)> = tl
+        .iter()
+        .map(|s| (s.t, if view.chart == ChartView::Wpm { s.wpm } else { s.accuracy }))
+        .collect();
+    let raw: Vec<(f64, f64)> = tl.iter().map(|s| (s.t, s.raw)).collect();
+    let (y0, y1) = match view.chart {
+        ChartView::Wpm => {
+            let top = tl.iter().map(|s| s.wpm.max(s.raw)).fold(0.0, f64::max);
+            (0.0, ((top * 1.1 / 10.0).ceil() * 10.0).max(10.0))
+        }
+        ChartView::Accuracy => {
+            let low = tl.iter().map(|s| s.accuracy).fold(100.0, f64::min);
+            (((low / 10.0).floor() * 10.0).min(90.0), 100.0)
+        }
+    };
+    let (x0, x1) = (tl[0].t, tl[tl.len() - 1].t);
+    let fmt_y = |v: f64| if view.chart == ChartView::Accuracy { format!("{v:.0}%") } else { format!("{v:.0}") };
+    let y_labels = [fmt_y(y1), fmt_y((y0 + y1) / 2.0), fmt_y(y0)];
+
+    // Axes: y labels, then a left axis and a bottom axis with x labels under it.
+    let buf = f.buffer_mut();
+    let label_w = y_labels.iter().map(|l| l.chars().count()).max().unwrap_or(1) as u16;
+    let axis_x = area.left() + label_w + 1;
+    let axis_y = area.bottom().saturating_sub(2);
+    if axis_x + 4 >= area.right() || axis_y <= area.top() + 2 {
+        return;
+    }
+    let plot = Plot {
+        left: axis_x + 1,
+        top: area.top(),
+        width: area.right() - axis_x - 1,
+        height: axis_y - area.top(),
+        x: (x0, x1),
+        y: (y0, y1),
+    };
+    let axis = dim();
+    for y in plot.top..axis_y {
+        buf[(axis_x, y)].set_char('│').set_style(axis);
+    }
+    buf[(axis_x, axis_y)].set_char('└').set_style(axis);
+    for x in axis_x + 1..area.right() {
+        buf[(x, axis_y)].set_char('─').set_style(axis);
+    }
+    let mid_row = plot.top + (plot.height - 1) / 2;
+    for (label, row) in y_labels.iter().zip([plot.top, mid_row, plot.top + plot.height - 1]) {
+        let x = axis_x - 1 - label.chars().count() as u16;
+        buf.set_string(x, row, label, axis);
+    }
+    let x_labels = [fmt_secs(x0), fmt_secs((x0 + x1) / 2.0), fmt_secs(x1)];
+    let label_row = axis_y + 1;
+    buf.set_string(plot.left, label_row, &x_labels[0], axis);
+    let mid = &x_labels[1];
+    buf.set_string(plot.left + plot.width / 2 - mid.chars().count() as u16 / 2, label_row, mid, axis);
+    let last = &x_labels[2];
+    buf.set_string(area.right() - last.chars().count() as u16, label_row, last, axis);
+
+    // Cursor first so the lines cross over it, then raw under the main line, then mistakes.
+    let cursor_col = plot.col(cur.t);
+    for y in plot.top..plot.top + plot.height {
+        buf[(cursor_col, y)].set_char('│').set_style(Style::new().fg(theme::MISTAKE));
+    }
+    if view.chart == ChartView::Wpm {
+        plot.draw_line(buf, &raw, raw_style);
+    }
+    plot.draw_line(buf, &main, accent);
+    for s in tl.iter().filter(|s| s.errors > 0) {
+        let v = if view.chart == ChartView::Wpm { s.wpm } else { s.accuracy };
+        buf[(plot.col(s.t), plot.row(v))].set_char('×').set_style(errors_style.bold());
+    }
+}
+
+/// Where a graph's data goes on screen. Lines are drawn with box-drawing characters so
+/// they're exactly as thin as the axes.
+struct Plot {
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+    x: (f64, f64),
+    y: (f64, f64),
+}
+
+impl Plot {
+    fn col(&self, t: f64) -> u16 {
+        let frac = ((t - self.x.0) / (self.x.1 - self.x.0)).clamp(0.0, 1.0);
+        self.left + (frac * (self.width - 1) as f64).round() as u16
+    }
+
+    fn row(&self, v: f64) -> u16 {
+        let frac = ((v - self.y.0) / (self.y.1 - self.y.0)).clamp(0.0, 1.0);
+        self.top + self.height - 1 - (frac * (self.height - 1) as f64).round() as u16
+    }
+
+    fn t_at(&self, col: u16) -> f64 {
+        self.x.0 + (col - self.left) as f64 / (self.width - 1).max(1) as f64 * (self.x.1 - self.x.0)
+    }
+
+    /// A line through `points` (sorted by x): one row per column, with corners where it steps.
+    fn draw_line(&self, buf: &mut ratatui::buffer::Buffer, points: &[(f64, f64)], style: Style) {
+        let mut prev: Option<u16> = None;
+        for c in self.left..self.left + self.width {
+            let r = self.row(interpolate(points, self.t_at(c)));
+            let mut put = |y: u16, ch: char| {
+                buf[(c, y)].set_char(ch).set_style(style);
+            };
+            match prev {
+                Some(p) if p != r => {
+                    for y in p.min(r) + 1..p.max(r) {
+                        put(y, '│');
+                    }
+                    // Arriving from the left on row p, leaving to the right on row r.
+                    if r > p {
+                        put(p, '╮');
+                        put(r, '╰');
+                    } else {
+                        put(p, '╯');
+                        put(r, '╭');
+                    }
+                }
+                _ => put(r, '─'),
+            }
+            prev = Some(r);
+        }
+    }
+}
+
+/// Linear interpolation between sorted (x, y) points, clamped at the ends.
+fn interpolate(points: &[(f64, f64)], x: f64) -> f64 {
+    let Some(&(first_x, first_y)) = points.first() else { return 0.0 };
+    if x <= first_x {
+        return first_y;
+    }
+    for w in points.windows(2) {
+        let ((ax, ay), (bx, by)) = (w[0], w[1]);
+        if x <= bx {
+            return if bx > ax { ay + (by - ay) * (x - ax) / (bx - ax) } else { by };
+        }
+    }
+    points.last().map_or(0.0, |p| p.1)
+}
+
+/// Seconds to one decimal, without a trailing ".0" (so "4s", "6.9s").
+fn fmt_secs(v: f64) -> String {
+    let r = (v * 10.0).round() / 10.0;
+    if r.fract() == 0.0 { format!("{r:.0}s") } else { format!("{r:.1}s") }
 }
 
 fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
@@ -495,9 +721,9 @@ fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
 fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
     let area = f.area();
     let current = ed.current();
-    let scale = Scale::fit(area.width, area.height.saturating_sub(10));
+    let scale = Scale::fit(area.width, area.height.saturating_sub(9 + BOTTOM_H));
 
-    let [_, title, sub, msg, _, board, _, info, entry, _, foot] = Split::vertical([
+    let [_, title, sub, msg, _, board, _, info, entry, _, foot, _] = Split::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -507,8 +733,10 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Fill(1),
+        // Actions just under the content, which is centered with them.
         Constraint::Length(1),
+        Constraint::Length(BOTTOM_H),
+        Constraint::Fill(1),
     ])
     .areas(area);
 
@@ -591,14 +819,18 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
             center(Line::from(vec![
                 Span::styled(format!("new {}: ", ed.slot.name()), dim()),
                 Span::styled(format!("{text}▏"), Style::new().fg(theme::ACCENT)),
-                Span::styled("   a character or keycode (left_shift, mo 1, none) · tab other action · enter apply", dim()),
+                Span::styled("   a character or keycode (left_shift, mo 1, none)", dim()),
             ])),
             entry,
         );
     }
 
-    let help = format!("arrows/press a key: select · enter change · del undo · tab layer · ctrl+s save · esc {cancel}");
-    f.render_widget(Paragraph::new(footer(app, &help)).alignment(Alignment::Center), foot);
+    let actions = if ed.entry.is_some() {
+        "tab other action · enter apply · esc cancel".to_string()
+    } else {
+        format!("arrows/press a key: select · enter change · del undo · tab layer · ctrl+s save · esc {cancel}")
+    };
+    draw_bottom(f, app, foot, &actions);
 }
 
 fn centered(area: Rect, width: u16) -> Rect {
@@ -609,6 +841,28 @@ fn centered(area: Rect, width: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plot_lines_are_box_drawing() {
+        let area = Rect::new(0, 0, 12, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let plot = Plot { left: 0, top: 0, width: 12, height: 6, x: (0.0, 11.0), y: (0.0, 5.0) };
+        // Flat at 0, then a step up to 5 halfway.
+        plot.draw_line(&mut buf, &[(0.0, 0.0), (5.0, 0.0), (6.0, 5.0), (11.0, 5.0)], Style::new());
+        let rows: Vec<String> =
+            (0..6).map(|y| (0..12).map(|x| buf[(x, y)].symbol().chars().next().unwrap()).collect()).collect();
+        assert_eq!(rows[5], "──────╯     ");
+        assert_eq!(rows[0], "      ╭─────");
+        assert!(rows[1..5].iter().all(|r| r.chars().nth(6) == Some('│')));
+        assert_eq!(interpolate(&[(0.0, 0.0), (2.0, 10.0)], 1.0), 5.0);
+    }
+
+    #[test]
+    fn seconds_labels() {
+        assert_eq!(fmt_secs(3.95), "4s");
+        assert_eq!(fmt_secs(6.9), "6.9s");
+        assert_eq!(fmt_secs(1.0), "1s");
+    }
 
     #[test]
     fn wraps_at_spaces() {

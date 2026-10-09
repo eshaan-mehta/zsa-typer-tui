@@ -10,6 +10,23 @@ pub struct Keystroke {
     pub correct: bool,
     /// Time since the previous keystroke (None for the first one).
     pub interval: Option<Duration>,
+    /// Time since the test started (the first keystroke).
+    pub at: Duration,
+}
+
+/// One second of a test, for the results graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Second {
+    /// Seconds since the start, at the end of this one (1, 2, ...; the last may be partial).
+    pub t: f64,
+    /// Running WPM from correct keystrokes so far.
+    pub wpm: f64,
+    /// WPM from every keystroke in just this second.
+    pub raw: f64,
+    /// Running accuracy so far, in percent.
+    pub accuracy: f64,
+    /// Mistakes made during this second.
+    pub errors: u32,
 }
 
 pub struct TypingTest {
@@ -96,7 +113,8 @@ impl TypingTest {
         let correct = c == expected;
         let interval = self.last_key_at.map(|t| now - t);
         self.last_key_at = Some(now);
-        self.keystrokes_log.push(Keystroke { expected, correct, interval });
+        let at = self.started.map_or(Duration::ZERO, |s| now - s);
+        self.keystrokes_log.push(Keystroke { expected, correct, interval, at });
         if !correct {
             self.mistakes += 1;
             *self.missed.entry(expected).or_default() += 1;
@@ -167,6 +185,49 @@ impl TypingTest {
         self.input.iter().filter(|c| **c == ' ').count() + usize::from(self.is_finished() && !self.failed)
     }
 
+    /// The test broken into seconds, for the results graph. Empty before the first keystroke.
+    pub fn timeline(&self) -> Vec<Second> {
+        let total = self.elapsed().as_secs_f64();
+        if self.keystrokes_log.is_empty() || total <= 0.0 {
+            return Vec::new();
+        }
+        let seconds = total.ceil().max(1.0) as usize;
+        let mut out = Vec::with_capacity(seconds);
+        let (mut typed, mut correct, mut k) = (0u32, 0u32, 0usize);
+        for s in 0..seconds {
+            let end = ((s + 1) as f64).min(total);
+            let (mut in_window, mut errors) = (0u32, 0u32);
+            // The last keystroke lands exactly at `total`, so include it in the final second.
+            while let Some(ks) = self.keystrokes_log.get(k) {
+                let at = ks.at.as_secs_f64();
+                if at > end || (at == end && s + 1 < seconds) {
+                    break;
+                }
+                in_window += 1;
+                typed += 1;
+                if ks.correct {
+                    correct += 1;
+                } else {
+                    errors += 1;
+                }
+                k += 1;
+            }
+            let window = end - s as f64;
+            out.push(Second {
+                t: end,
+                wpm: correct as f64 / 5.0 / (end / 60.0),
+                raw: if window > 0.0 { in_window as f64 / 5.0 / (window / 60.0) } else { 0.0 },
+                accuracy: if typed == 0 { 100.0 } else { 100.0 * correct as f64 / typed as f64 },
+                errors,
+            });
+        }
+        // End on the same WPM as the summary (which only counts characters still correct).
+        if let Some(last) = out.last_mut().filter(|_| self.is_finished()) {
+            last.wpm = self.wpm();
+        }
+        out
+    }
+
     /// The most-missed characters, worst first.
     pub fn most_missed(&self, n: usize) -> Vec<(char, u32)> {
         let mut v: Vec<(char, u32)> = self.missed.iter().map(|(c, n)| (*c, *n)).collect();
@@ -212,6 +273,29 @@ mod tests {
         assert!(t.is_finished() && t.is_failed());
         assert_eq!(t.type_char('c'), None);
         assert_eq!(t.words_done(), 0);
+    }
+
+    #[test]
+    fn timeline_by_second() {
+        let mut t = TypingTest::from_text("abcdef");
+        let ms = Duration::from_millis;
+        // Fake a 2.5 s test: 3 keys in the first second (one wrong), 2 in the second, 1 at the end.
+        for (c, at) in [('a', 0), ('x', 400), ('c', 800), ('d', 1200), ('e', 1600), ('f', 2500)] {
+            t.type_char(c);
+            t.keystrokes_log.last_mut().unwrap().at = ms(at);
+        }
+        t.started = Some(Instant::now() - ms(2500));
+        t.finished = t.started.map(|s| s + ms(2500));
+        let tl = t.timeline();
+        assert_eq!(tl.len(), 3);
+        assert_eq!(tl.iter().map(|s| s.errors).collect::<Vec<_>>(), vec![1, 0, 0]);
+        // First second: 3 keystrokes -> 36 raw wpm; 2 correct -> 24 wpm; 2 of 3 right.
+        assert!((tl[0].raw - 36.0).abs() < 1e-9 && (tl[0].wpm - 24.0).abs() < 1e-9);
+        assert!((tl[0].accuracy - 200.0 / 3.0).abs() < 1e-9);
+        // Final half second: 1 keystroke in 0.5 s -> 24 raw wpm.
+        assert!((tl[2].t - 2.5).abs() < 1e-9 && (tl[2].raw - 24.0).abs() < 1e-9);
+        assert_eq!(tl[2].wpm, t.wpm());
+        assert!(TypingTest::from_text("ab").timeline().is_empty());
     }
 
     #[test]
