@@ -1,4 +1,5 @@
 mod device;
+mod generator;
 mod geometry;
 mod keycode;
 mod layout;
