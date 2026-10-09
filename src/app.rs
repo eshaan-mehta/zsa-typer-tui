@@ -17,11 +17,10 @@ use crate::keycode;
 use crate::layout::{Action, Edit, Key, Layout, Press};
 use crate::oryx;
 use crate::stats::{Progression, Stats, Targets};
-use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE};
+use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE, WORD_COUNT_RANGE};
 use crate::typing::TypingTest;
 use crate::ui;
 
-pub const WORD_COUNTS: [usize; 4] = [10, 25, 50, 100];
 pub const SETTINGS_ITEMS: [&str; 10] = [
     "Mode",
     "Hints",
@@ -47,6 +46,7 @@ const SEARCH_RESET: Duration = Duration::from_millis(1000);
 /// Settings that are typed in as numbers: (allowed range, step for ←/→).
 pub fn number_field(item: &str) -> Option<(std::ops::RangeInclusive<u32>, u32)> {
     match item {
+        "Words" => Some((WORD_COUNT_RANGE, 5)),
         "Target speed" => Some((TARGET_WPM_RANGE, 5)),
         "Target accuracy" => Some((TARGET_ACCURACY_RANGE, 1)),
         _ => None,
@@ -654,6 +654,7 @@ impl App {
     pub fn number_value(&self, item: &str) -> u32 {
         let s = &self.store.saved.settings;
         match item {
+            "Words" => s.word_count as u32,
             "Target speed" => s.target_wpm,
             "Target accuracy" => s.target_accuracy,
             _ => 0,
@@ -663,11 +664,15 @@ impl App {
     fn set_number(&mut self, item: &str, v: u32) {
         let s = &mut self.store.saved.settings;
         match item {
+            "Words" => s.word_count = v as usize,
             "Target speed" => s.target_wpm = v,
             "Target accuracy" => s.target_accuracy = v,
             _ => return,
         }
         self.persist();
+        if item == "Words" {
+            self.test = self.make_test();
+        }
     }
 
     /// ←/→: step through a setting's values. Actions (reset, quit, ...) only run on Enter.
@@ -697,14 +702,6 @@ impl App {
                 s.instant_death = !s.instant_death;
                 self.persist();
             }
-            "Words" => {
-                let s = &mut self.store.saved.settings;
-                let i = WORD_COUNTS.iter().position(|&w| w == s.word_count).unwrap_or(1);
-                let n = WORD_COUNTS.len();
-                s.word_count = WORD_COUNTS[if forward { (i + 1) % n } else { (i + n - 1) % n }];
-                self.persist();
-                self.test = self.make_test();
-            }
             _ => {}
         }
     }
@@ -719,7 +716,7 @@ impl App {
             return;
         }
         match item {
-            "Mode" | "Hints" | "Instant death" | "Words" => self.adjust_setting(item, true),
+            "Mode" | "Hints" | "Instant death" => self.adjust_setting(item, true),
             "Reset progress" => {
                 self.stats = Stats::default();
                 self.on_layout_changed();

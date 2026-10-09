@@ -48,6 +48,7 @@ pub struct Settings {
 
 pub const TARGET_WPM_RANGE: std::ops::RangeInclusive<u32> = 10..=200;
 pub const TARGET_ACCURACY_RANGE: std::ops::RangeInclusive<u32> = 50..=100;
+pub const WORD_COUNT_RANGE: std::ops::RangeInclusive<u32> = 5..=500;
 
 impl Default for Settings {
     fn default() -> Self {

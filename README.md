@@ -80,7 +80,7 @@ the key's bottom border says how to press it (`hold`, `2×`, `t+hld`).
 | Mode | progressive / weak keys / words |
 | Hints | outline the next key on the board |
 | Instant death | end the test on the first mistake |
-| Words | words per test (10 / 25 / 50 / 100) |
+| Words | words per test (5–500) |
 | Target speed | per-letter speed a letter needs to count as learned (10–200 wpm) |
 | Target accuracy | per-letter accuracy needed alongside it (50–100%) |
 | Edit layout | fix keys by hand |
