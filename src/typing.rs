@@ -21,7 +21,7 @@ pub struct Second {
     pub t: f64,
     /// Running WPM from correct keystrokes so far.
     pub wpm: f64,
-    /// WPM from every keystroke in just this second.
+    /// Typing speed during just this second, counting every keystroke (right or wrong).
     pub raw: f64,
     /// Running accuracy so far, in percent.
     pub accuracy: f64,
@@ -192,18 +192,37 @@ impl TypingTest {
             return Vec::new();
         }
         let seconds = total.ceil().max(1.0) as usize;
+
+        // Keystrokes' worth of typing in each second, for raw speed. A keystroke stands for the
+        // time since the one before it, so it's spread over that span. (Counted whole where it
+        // landed, the last second, which always ends on a keystroke and can be a sliver of a
+        // second, would spike.)
+        let mut typed_in = vec![0.0; seconds];
+        for pair in self.keystrokes_log.windows(2) {
+            let (a, b) = (pair[0].at.as_secs_f64(), pair[1].at.as_secs_f64());
+            let last = (b as usize).min(seconds - 1);
+            if b <= a {
+                typed_in[last] += 1.0;
+                continue;
+            }
+            let first = (a as usize).min(last);
+            for (s, in_second) in (first..=last).zip(&mut typed_in[first..=last]) {
+                let overlap = b.min((s + 1) as f64) - a.max(s as f64);
+                *in_second += overlap.max(0.0) / (b - a);
+            }
+        }
+
         let mut out = Vec::with_capacity(seconds);
         let (mut typed, mut correct, mut k) = (0u32, 0u32, 0usize);
-        for s in 0..seconds {
+        for (s, in_second) in typed_in.iter().enumerate() {
             let end = ((s + 1) as f64).min(total);
-            let (mut in_window, mut errors) = (0u32, 0u32);
+            let mut errors = 0u32;
             // The last keystroke lands exactly at `total`, so include it in the final second.
             while let Some(ks) = self.keystrokes_log.get(k) {
                 let at = ks.at.as_secs_f64();
                 if at > end || (at == end && s + 1 < seconds) {
                     break;
                 }
-                in_window += 1;
                 typed += 1;
                 if ks.correct {
                     correct += 1;
@@ -216,7 +235,7 @@ impl TypingTest {
             out.push(Second {
                 t: end,
                 wpm: correct as f64 / 5.0 / (end / 60.0),
-                raw: if window > 0.0 { in_window as f64 / 5.0 / (window / 60.0) } else { 0.0 },
+                raw: if window > 0.0 { in_second / 5.0 / (window / 60.0) } else { 0.0 },
                 accuracy: if typed == 0 { 100.0 } else { 100.0 * correct as f64 / typed as f64 },
                 errors,
             });
@@ -289,13 +308,35 @@ mod tests {
         let tl = t.timeline();
         assert_eq!(tl.len(), 3);
         assert_eq!(tl.iter().map(|s| s.errors).collect::<Vec<_>>(), vec![1, 0, 0]);
-        // First second: 3 keystrokes -> 36 raw wpm; 2 correct -> 24 wpm; 2 of 3 right.
-        assert!((tl[0].raw - 36.0).abs() < 1e-9 && (tl[0].wpm - 24.0).abs() < 1e-9);
+        // First second: the keys at 0.4 and 0.8 s, plus half of the one at 1.2 s (which took
+        // 0.8–1.2 s) -> 2.5 keystrokes -> 30 raw wpm. 2 correct -> 24 wpm; 2 of 3 right.
+        assert!((tl[0].raw - 30.0).abs() < 1e-9 && (tl[0].wpm - 24.0).abs() < 1e-9);
         assert!((tl[0].accuracy - 200.0 / 3.0).abs() < 1e-9);
-        // Final half second: 1 keystroke in 0.5 s -> 24 raw wpm.
-        assert!((tl[2].t - 2.5).abs() < 1e-9 && (tl[2].raw - 24.0).abs() < 1e-9);
+        // Final half second: the last key took 0.9 s, so it's typing at 1/0.9 keys a second
+        // -> 13.3 raw wpm (not a whole keystroke in 0.5 s).
+        assert!((tl[2].t - 2.5).abs() < 1e-9 && (tl[2].raw - 12.0 / 0.9).abs() < 1e-9);
         assert_eq!(tl[2].wpm, t.wpm());
         assert!(TypingTest::from_text("ab").timeline().is_empty());
+    }
+
+    #[test]
+    fn steady_typing_graphs_flat() {
+        // A key every 230 ms, finishing 10 ms into the last second.
+        let n = 88;
+        let mut t = TypingTest::from_text(&"a".repeat(n));
+        for i in 0..n {
+            t.type_char('a');
+            t.keystrokes_log.last_mut().unwrap().at = Duration::from_millis(230 * i as u64);
+        }
+        let total = Duration::from_millis(230 * (n as u64 - 1));
+        t.started = Some(Instant::now() - total);
+        t.finished = t.started.map(|s| s + total);
+        let speed = 12_000.0 / 230.0;
+        let tl = t.timeline();
+        assert!((tl.last().unwrap().t - 20.01).abs() < 1e-9);
+        for s in tl {
+            assert!((s.raw - speed).abs() < 1e-6, "raw {:.1} at {}s, typing at {speed:.1}", s.raw, s.t);
+        }
     }
 
     #[test]
