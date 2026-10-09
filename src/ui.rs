@@ -479,7 +479,7 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
     .areas(area);
 
     let (heading, cancel) = match ed.purpose {
-        EditorPurpose::Onboarding => ("Is this your layout?", "skip for now"),
+        EditorPurpose::Onboarding => ("Verify your layout", "skip for now"),
         EditorPurpose::NewRevision => ("Your Voyager has a new layout revision", "keep old layout"),
         EditorPurpose::Edit => ("Edit layout", "discard changes"),
         EditorPurpose::Manual => ("Set up your layout", "skip for now"),
@@ -490,14 +490,7 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
     let layer_title = current.layers.get(ed.layer).map(|l| l.title.clone()).unwrap_or_default();
     f.render_widget(
         center(Line::styled(
-            format!(
-                "{} · revision {} · layer {}/{}: {}",
-                current.title,
-                current.revision_id,
-                ed.layer + 1,
-                current.layers.len(),
-                layer_title
-            ),
+            format!("{} · layer {}/{}: {}", current.title, ed.layer + 1, current.layers.len(), layer_title),
             dim(),
         )),
         sub,
