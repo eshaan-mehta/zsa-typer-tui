@@ -93,7 +93,7 @@ pub struct Store {
 
 impl Store {
     pub fn open() -> Self {
-        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("tui-typer");
+        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("zsa-typer-tui");
         let saved = read_json(&dir.join("state.json")).unwrap_or_default();
         Store { dir, saved }
     }

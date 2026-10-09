@@ -1,4 +1,4 @@
-# tui-typer
+# zsa-typer-tui
 
 A minimal, monkeytype-style typing trainer for the terminal, built for people learning to type on the
 **ZSA Voyager**.
@@ -100,7 +100,7 @@ In the layout editor a key can be set to a character (`q`, `!`) or a QMK keycode
   from a letter model trained on the built-in word list.
 
 Settings, cached layouts and stats are stored in your config directory (`~/Library/Application
-Support/tui-typer` on macOS, `~/.config/tui-typer` on Linux).
+Support/zsa-typer-tui` on macOS, `~/.config/zsa-typer-tui` on Linux).
 
 ### Debugging the board connection
 
