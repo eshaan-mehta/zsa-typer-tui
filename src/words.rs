@@ -105,6 +105,28 @@ pub const MORE: &[&str] = &[
     "wrong", "yard", "yellow", "yes", "yet", "young", "youth", "zero", "zone", "zoo",
 ];
 
+/// Largest word file we'll read, so a wrong path (a video, say) fails fast.
+const MAX_WORD_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Read a user's word list: words separated by whitespace (usually one per line).
+/// Keeps them as written (case, punctuation) and drops duplicates.
+pub fn load_word_file(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+    if meta.is_dir() {
+        return Err(format!("{} is a folder, not a file", path.display()));
+    }
+    if meta.len() > MAX_WORD_FILE_BYTES {
+        return Err(format!("{} is too big for a word list (over 5 MB)", path.display()));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let mut seen = std::collections::HashSet::new();
+    let words: Vec<String> = text.split_whitespace().filter(|w| seen.insert(*w)).map(String::from).collect();
+    if words.is_empty() {
+        return Err(format!("{} has no words in it", path.display()));
+    }
+    Ok(words)
+}
+
 /// All words, without duplicates.
 pub fn corpus() -> Vec<&'static str> {
     let mut seen = std::collections::HashSet::new();
@@ -120,6 +142,20 @@ mod tests {
         for w in ENGLISH_200.iter().chain(MORE) {
             assert!(w.chars().all(|c| c.is_ascii_lowercase()), "{w}");
         }
+    }
+
+    #[test]
+    fn loads_word_files() {
+        let dir = std::env::temp_dir().join(format!("zsa-typer-words-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("words.txt");
+        std::fs::write(&file, "alpha\nbeta  gamma\n\nalpha\nDelta!\n").unwrap();
+        assert_eq!(load_word_file(&file).unwrap(), vec!["alpha", "beta", "gamma", "Delta!"]);
+        std::fs::write(&file, "  \n").unwrap();
+        assert!(load_word_file(&file).unwrap_err().contains("no words"));
+        assert!(load_word_file(&dir).unwrap_err().contains("folder"));
+        assert!(load_word_file(&dir.join("missing.txt")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

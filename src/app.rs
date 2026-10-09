@@ -21,11 +21,12 @@ use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RAN
 use crate::typing::TypingTest;
 use crate::ui;
 
-pub const SETTINGS_ITEMS: [&str; 10] = [
+pub const SETTINGS_ITEMS: [&str; 11] = [
     "Mode",
     "Hints",
     "Instant death",
     "Words",
+    "Word list",
     "Target speed",
     "Target accuracy",
     "Edit layout",
@@ -69,15 +70,41 @@ pub struct SettingsMenu {
     /// What's been typed to jump to a setting.
     pub search: String,
     last_typed: Option<Instant>,
-    /// A number being typed into the selected setting.
-    pub editing: Option<NumberEntry>,
+    /// A value being typed into the selected setting.
+    pub editing: Option<Entry>,
 }
 
-pub struct NumberEntry {
+/// Text being typed into a setting: a number, or the word list's file path.
+pub struct Entry {
     pub text: String,
-    /// True until the user types: the first digit replaces the current value.
+    /// True until the user types: the first character replaces the current value.
     fresh: bool,
     pub error: Option<String>,
+    pub is_path: bool,
+}
+
+/// The loaded custom word list, for display.
+pub struct WordList {
+    pub name: String,
+    pub count: usize,
+}
+
+/// Turn what the user typed into an absolute path ("~" means the home directory).
+fn expand_path(text: &str) -> std::path::PathBuf {
+    let text = text.trim();
+    let path = match text.strip_prefix("~/").or((text == "~").then_some("")) {
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+        None => std::path::PathBuf::from(text),
+    };
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+/// Load the word list at `path`, describing it for the settings menu.
+fn load_words(path: &std::path::Path) -> Result<(Vec<String>, WordList), String> {
+    let words = crate::words::load_word_file(path)?;
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let count = words.len();
+    Ok((words, WordList { name, count }))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +210,8 @@ pub struct App {
     pub progression: Option<Progression>,
     /// Letter unlocked by the test that just finished.
     pub just_unlocked: Option<char>,
+    /// The custom word list in use, if any.
+    pub word_list: Option<WordList>,
     generator: Generator,
     last_press: Option<(usize, Instant)>,
     suppress_until: Option<Instant>,
@@ -198,6 +227,17 @@ impl App {
         let store = Store::open();
         let layout = store.confirmed_layout();
         let stats = store.load_stats();
+        let mut startup_notice = None;
+        let (custom, word_list) = match &store.saved.settings.word_file {
+            Some(file) => match load_words(std::path::Path::new(file)) {
+                Ok((words, list)) => (Some(words), Some(list)),
+                Err(e) => {
+                    startup_notice = Some(format!("Couldn't load your word list ({e}). Using built-in words."));
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
         let mut app = App {
             store,
             screen: Screen::Typing,
@@ -212,7 +252,8 @@ impl App {
             stats,
             progression: None,
             just_unlocked: None,
-            generator: Generator::new(),
+            word_list,
+            generator: Generator::new(custom.as_deref()),
             last_press: None,
             suppress_until: None,
             device_rx: device::spawn(),
@@ -222,6 +263,9 @@ impl App {
         };
         app.on_layout_changed();
         app.test = app.make_test();
+        if let Some(n) = startup_notice {
+            app.set_notice(n);
+        }
         app
     }
 
@@ -471,7 +515,7 @@ impl App {
                 let weight = |c: char| stats.weakness(c, target);
                 TypingTest::from_text(&self.generator.text(&mut rng, &allowed, &weight, focus, count))
             }
-            _ => TypingTest::random(count),
+            _ => TypingTest::from_text(&self.generator.random_words(&mut rng, count)),
         }
     }
 
@@ -581,15 +625,25 @@ impl App {
                     entry.text.pop();
                     entry.error = None;
                 }
-                KeyCode::Char(c) if c.is_ascii_digit() => {
+                KeyCode::Char(c) if c.is_ascii_digit() || entry.is_path => {
                     if entry.fresh {
                         entry.text.clear();
                         entry.fresh = false;
                     }
-                    if entry.text.len() < 3 {
+                    if entry.is_path || entry.text.len() < 3 {
                         entry.text.push(c);
                     }
                     entry.error = None;
+                }
+                KeyCode::Enter if entry.is_path => {
+                    let text = entry.text.clone();
+                    if let Err(e) = self.set_word_file(&text) {
+                        if let Screen::Settings(SettingsMenu { editing: Some(entry), .. }) = &mut self.screen {
+                            entry.error = Some(e);
+                        }
+                    } else if let Screen::Settings(menu) = &mut self.screen {
+                        menu.editing = None;
+                    }
                 }
                 KeyCode::Enter => {
                     let Some((range, _)) = number_field(item) else { return };
@@ -634,7 +688,7 @@ impl App {
             // Digits on a number setting start typing a new value.
             KeyCode::Char(c) if c.is_ascii_digit() && number_field(item).is_some() => {
                 menu.search.clear();
-                menu.editing = Some(NumberEntry { text: c.to_string(), fresh: false, error: None });
+                menu.editing = Some(Entry { text: c.to_string(), fresh: false, error: None, is_path: false });
             }
             KeyCode::Char(c) => {
                 let now = Instant::now();
@@ -675,6 +729,27 @@ impl App {
         }
     }
 
+    /// Load a word list from `text` (a path), or go back to the built-in words if it's empty.
+    fn set_word_file(&mut self, text: &str) -> Result<(), String> {
+        let (custom, list, path) = if text.trim().is_empty() {
+            (None, None, None)
+        } else {
+            let path = expand_path(text);
+            let (words, list) = load_words(&path)?;
+            (Some(words), Some(list), Some(path.display().to_string()))
+        };
+        self.set_notice(match &list {
+            Some(l) => format!("Loaded {} words from {}.", l.count, l.name),
+            None => "Using the built-in words.".to_string(),
+        });
+        self.generator = Generator::new(custom.as_deref());
+        self.word_list = list;
+        self.store.saved.settings.word_file = path;
+        self.persist();
+        self.test = self.make_test();
+        Ok(())
+    }
+
     /// ←/→: step through a setting's values. Actions (reset, quit, ...) only run on Enter.
     fn adjust_setting(&mut self, item: &str, forward: bool) {
         if let Some((range, step)) = number_field(item) {
@@ -708,10 +783,15 @@ impl App {
 
     /// Enter: change a value setting, start typing a number, or run an action.
     fn activate_setting(&mut self, item: &str) {
-        if number_field(item).is_some() {
-            let text = self.number_value(item).to_string();
+        if number_field(item).is_some() || item == "Word list" {
+            let is_path = item == "Word list";
+            let text = if is_path {
+                self.store.saved.settings.word_file.clone().unwrap_or_default()
+            } else {
+                self.number_value(item).to_string()
+            };
             if let Screen::Settings(menu) = &mut self.screen {
-                menu.editing = Some(NumberEntry { text, fresh: true, error: None });
+                menu.editing = Some(Entry { text, fresh: true, error: None, is_path });
             }
             return;
         }
@@ -898,6 +978,8 @@ mod tests {
         assert_eq!(name("q"), Some("Quit"));
         assert_eq!(name("inst"), Some("Instant death"));
         assert_eq!(name("death"), Some("Instant death"));
+        assert_eq!(name("word l"), Some("Word list"));
+        assert_eq!(name("list"), Some("Word list"));
         assert_eq!(name("xyz"), None);
         // j/k move the selection, so no setting may need them to be found.
         assert!(SETTINGS_ITEMS.iter().all(|s| !s.to_lowercase().contains(['j', 'k'])));

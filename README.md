@@ -81,6 +81,7 @@ the key's bottom border says how to press it (`hold`, `2×`, `t+hld`).
 | Hints | outline the next key on the board |
 | Instant death | end the test on the first mistake |
 | Words | words per test (5–500) |
+| Word list | path to your own word file (words separated by spaces or new lines); empty for the built-in words |
 | Target speed | per-letter speed a letter needs to count as learned (10–200 wpm) |
 | Target accuracy | per-letter accuracy needed alongside it (50–100%) |
 | Edit layout | fix keys by hand |

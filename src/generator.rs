@@ -97,22 +97,38 @@ fn weighted<T: Copy>(rng: &mut impl Rng, options: &[(T, f64)]) -> Option<T> {
 }
 
 pub struct Generator {
-    corpus: Vec<&'static str>,
+    /// Words for words mode, as written.
+    plain: Vec<String>,
+    /// Words the letter-filtered modes pick from.
+    corpus: Vec<String>,
     model: LetterModel,
 }
 
 impl Generator {
-    pub fn new() -> Self {
-        let corpus = words::corpus();
-        let model = LetterModel::train(corpus.iter().copied());
-        Generator { corpus, model }
+    /// Uses `custom` words if given, otherwise the built-in lists.
+    pub fn new(custom: Option<&[String]>) -> Self {
+        let builtin: Vec<String> = words::corpus().into_iter().map(String::from).collect();
+        let (plain, corpus) = match custom {
+            Some(words) => (words.to_vec(), words.to_vec()),
+            None => (words::ENGLISH_200.iter().map(|w| w.to_string()).collect(), builtin.clone()),
+        };
+        // Letter patterns come from the built-in words plus any plain lowercase custom words,
+        // so pseudo-words stay pronounceable even with a small or unusual list.
+        let lowercase_custom = corpus.iter().filter(|w| w.chars().all(|c| c.is_ascii_lowercase()));
+        let model = LetterModel::train(builtin.iter().chain(lowercase_custom).map(String::as_str));
+        Generator { plain, corpus, model }
+    }
+
+    /// `count` random words for words mode.
+    pub fn random_words(&self, rng: &mut impl Rng, count: usize) -> String {
+        (0..count).map(|_| self.plain[rng.random_range(0..self.plain.len())].as_str()).collect::<Vec<_>>().join(" ")
     }
 
     /// Real words spellable with `allowed`.
-    pub fn real_words(&self, allowed: &BTreeSet<char>) -> Vec<&'static str> {
+    pub fn real_words(&self, allowed: &BTreeSet<char>) -> Vec<&str> {
         self.corpus
             .iter()
-            .copied()
+            .map(String::as_str)
             .filter(|w| w.len() >= MIN_LEN && w.chars().all(|c| allowed.contains(&c)))
             .collect()
     }
@@ -178,7 +194,7 @@ mod tests {
 
     #[test]
     fn only_allowed_letters() {
-        let g = Generator::new();
+        let g = Generator::new(None);
         let mut rng = StdRng::seed_from_u64(1);
         for letters in ["etainshr", "asdfjkl", "asdfjklei"] {
             let allowed = set(letters);
@@ -192,7 +208,7 @@ mod tests {
 
     #[test]
     fn small_sets_use_pseudo_words() {
-        let g = Generator::new();
+        let g = Generator::new(None);
         let mut rng = StdRng::seed_from_u64(2);
         let allowed = set("asdfjkl");
         let real = g.real_words(&allowed);
@@ -202,8 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn custom_words() {
+        let custom: Vec<String> = ["rust", "tusk", "Struct!", "trust"].iter().map(|w| w.to_string()).collect();
+        let g = Generator::new(Some(&custom));
+        let mut rng = StdRng::seed_from_u64(4);
+        // Words mode uses the custom list as written, punctuation and all.
+        let words = g.random_words(&mut rng, 30);
+        assert!(words.split(' ').all(|w| custom.iter().any(|c| c == w)), "{words}");
+        // Letter modes only take custom words that fit the allowed letters.
+        assert_eq!(g.real_words(&set("rustk")), vec!["rust", "tusk", "trust"]);
+    }
+
+    #[test]
     fn focus_letter_shows_up() {
-        let g = Generator::new();
+        let g = Generator::new(None);
         let mut rng = StdRng::seed_from_u64(3);
         let text = g.text(&mut rng, &set("etainshro"), &|_| 1.0, Some('o'), 40);
         let with_o = text.split(' ').filter(|w| w.contains('o')).count();
@@ -219,7 +247,7 @@ mod samples {
     #[test]
     #[ignore]
     fn print_samples() {
-        let g = Generator::new();
+        let g = Generator::new(None);
         let mut rng = rand::rng();
         for letters in ["etainshr", "etainshro", "etainshrodlcu", "asdfjkl", "asdfjklei"] {
             let allowed: BTreeSet<char> = letters.chars().collect();

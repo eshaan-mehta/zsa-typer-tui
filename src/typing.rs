@@ -3,10 +3,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use rand::seq::IndexedRandom;
-
-use crate::words::ENGLISH_200;
-
 /// One typed character, for per-letter stats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keystroke {
@@ -34,12 +30,6 @@ pub struct TypingTest {
 }
 
 impl TypingTest {
-    pub fn random(word_count: usize) -> Self {
-        let mut rng = rand::rng();
-        let words: Vec<&str> = (0..word_count).filter_map(|_| ENGLISH_200.choose(&mut rng).copied()).collect();
-        Self::from_text(&words.join(" "))
-    }
-
     pub fn from_text(text: &str) -> Self {
         TypingTest {
             target: text.chars().collect(),

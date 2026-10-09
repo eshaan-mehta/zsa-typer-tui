@@ -44,6 +44,8 @@ pub struct Settings {
     pub target_wpm: u32,
     /// Per-letter accuracy (percent) needed alongside the speed.
     pub target_accuracy: u32,
+    /// The user's own word list (absolute path); None uses the built-in words.
+    pub word_file: Option<String>,
 }
 
 pub const TARGET_WPM_RANGE: std::ops::RangeInclusive<u32> = 10..=200;
@@ -59,6 +61,7 @@ impl Default for Settings {
             word_count: 25,
             target_wpm: 30,
             target_accuracy: 95,
+            word_file: None,
         }
     }
 }

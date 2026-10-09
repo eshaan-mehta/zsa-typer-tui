@@ -423,7 +423,20 @@ fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
                 _ => "",
             };
             let value = match (*name, &menu.editing) {
-                (_, Some(entry)) if selected => format!("{}▏{unit}", entry.text),
+                (_, Some(entry)) if selected && !entry.is_path => format!("{}▏{unit}", entry.text),
+                ("Word list", _) => match &app.word_list {
+                    Some(l) => {
+                        let count = format!(" ({})", l.count);
+                        let room = 20usize.saturating_sub(count.chars().count());
+                        let name: String = if l.name.chars().count() > room {
+                            l.name.chars().take(room.saturating_sub(1)).chain(['…']).collect()
+                        } else {
+                            l.name.clone()
+                        };
+                        name + &count
+                    }
+                    None => "built-in".to_string(),
+                },
                 ("Mode", _) => s.mode.name().to_string(),
                 ("Hints", _) => if s.hints { "on" } else { "off" }.to_string(),
                 ("Instant death", _) => if s.instant_death { "on" } else { "off" }.to_string(),
@@ -438,12 +451,30 @@ fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
     lines.push(Line::default());
 
     // Status line: number entry help/error, or the type-to-jump search.
+    // Bottom of the popup: what's being typed or searched, and details/errors. Keys are in the
+    // screen's bottom bar like everywhere else.
+    let mut detail = Line::default();
     let status = match &menu.editing {
+        // The path gets the whole status line; hints and errors take the help line.
+        Some(entry) if entry.is_path => {
+            let room = inner.width.saturating_sub(10) as usize;
+            let chars: Vec<char> = entry.text.chars().collect();
+            let shown: String = if chars.len() > room {
+                std::iter::once('…').chain(chars[chars.len() - room + 1..].iter().copied()).collect()
+            } else {
+                entry.text.clone()
+            };
+            detail = match &entry.error {
+                Some(err) => Line::styled(err.clone(), Style::new().fg(theme::MISTAKE)),
+                None => Line::styled("words separated by spaces or new lines · empty for built-in", dim()),
+            };
+            Line::from(vec![Span::styled("file: ", dim()), Span::styled(format!("{shown}▏"), accent)])
+        }
         Some(entry) => match &entry.error {
             Some(err) => Line::styled(err.clone(), Style::new().fg(theme::MISTAKE)),
             None => {
                 let range = number_field(SETTINGS_ITEMS[menu.selected]).map(|(r, _)| format!("{}–{}", r.start(), r.end()));
-                Line::styled(format!("type a number ({}) · enter save · esc cancel", range.unwrap_or_default()), dim())
+                Line::styled(format!("type a number ({})", range.unwrap_or_default()), dim())
             }
         },
         None if !menu.search.is_empty() => {
@@ -457,7 +488,7 @@ fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
         None => Line::default(),
     };
     lines.push(status);
-    lines.push(Line::styled("↑↓/jk move · type to jump · enter change · ←→ adjust · esc close", dim()));
+    lines.push(detail);
     f.render_widget(Paragraph::new(lines), inner.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 }));
 }
 
