@@ -67,8 +67,11 @@ After that it only fetches again when you flash a new revision.
 | Settings | `↑↓` / `j k` move · type a setting's name to jump to it · `enter` change · `←→` adjust · `esc` close |
 | Layout editor | arrows or press a key on the board to select · `enter` change key · `del` undo change · `tab` next layer · `ctrl+s` save · `esc` cancel |
 
-In the layout editor a key can be set to a character (`q`, `!`) or a QMK keycode (`left_shift`, `mo 1`,
-`none`).
+In the layout editor each of a key's four actions (tap, hold, double tap, tap-then-hold; `tab` switches
+while editing) can be set to a character (`q`, `!`) or a QMK keycode (`left_shift`, `mo 1`), or cleared
+with `none`. On the board, a key's tap is its label, its hold is in the bottom border, and a dot (`•`)
+marks keys that also have a double tap or tap-then-hold. When a hinted character is on one of those,
+the key's bottom border says how to press it (`hold`, `2×`, `t+hld`).
 
 ### Settings
 

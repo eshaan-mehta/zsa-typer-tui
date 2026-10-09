@@ -78,17 +78,80 @@ pub struct Key {
     pub tap: Option<Action>,
     #[serde(default)]
     pub hold: Option<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_tap: Option<Action>,
+    /// Tap, then press again and hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_hold: Option<Action>,
     #[serde(default)]
     pub custom_label: Option<String>,
 }
 
+/// One of the ways a key can be pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    Tap,
+    Hold,
+    DoubleTap,
+    TapHold,
+}
+
+impl Press {
+    pub const ALL: [Press; 4] = [Press::Tap, Press::Hold, Press::DoubleTap, Press::TapHold];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Press::Tap => "tap",
+            Press::Hold => "hold",
+            Press::DoubleTap => "double tap",
+            Press::TapHold => "tap+hold",
+        }
+    }
+
+    /// Shown in a hinted key's bottom border when it isn't a plain tap (truncated to fit).
+    pub fn short(self) -> &'static str {
+        match self {
+            Press::Tap => "",
+            Press::Hold => "hold",
+            Press::DoubleTap => "2×",
+            Press::TapHold => "t+hld",
+        }
+    }
+}
+
 impl Key {
+    #[cfg(test)]
     pub fn tap(code: impl Into<String>) -> Self {
         Key { tap: Some(Action::new(code)), ..Default::default() }
     }
 
+    pub fn action(&self, p: Press) -> Option<&Action> {
+        match p {
+            Press::Tap => self.tap.as_ref(),
+            Press::Hold => self.hold.as_ref(),
+            Press::DoubleTap => self.double_tap.as_ref(),
+            Press::TapHold => self.tap_hold.as_ref(),
+        }
+    }
+
+    pub fn action_mut(&mut self, p: Press) -> &mut Option<Action> {
+        match p {
+            Press::Tap => &mut self.tap,
+            Press::Hold => &mut self.hold,
+            Press::DoubleTap => &mut self.double_tap,
+            Press::TapHold => &mut self.tap_hold,
+        }
+    }
+
+    /// Has a double-tap or tap-then-hold action (not shown on the key itself).
+    pub fn has_extra(&self) -> bool {
+        self.double_tap.is_some() || self.tap_hold.is_some()
+    }
+
     pub fn is_transparent(&self) -> bool {
-        self.hold.is_none() && self.tap.as_ref().is_some_and(|t| keycode::is_transparent(&t.code))
+        self.hold.is_none()
+            && !self.has_extra()
+            && self.tap.as_ref().is_some_and(|t| keycode::is_transparent(&t.code))
     }
 
     pub fn label(&self) -> String {
@@ -103,7 +166,7 @@ impl Key {
     }
 
     fn actions(&self) -> impl Iterator<Item = &Action> {
-        self.tap.iter().chain(self.hold.iter())
+        Press::ALL.into_iter().filter_map(|p| self.action(p))
     }
 }
 
@@ -139,6 +202,8 @@ pub struct Hint {
     /// Shift key to hold, when the character needs shift.
     pub shift_key: Option<usize>,
     pub needs_shift: bool,
+    /// How to press `key` (usually a plain tap).
+    pub press: Press,
 }
 
 impl Layout {
@@ -189,27 +254,31 @@ impl Layout {
         (0..KEY_COUNT).find(|&i| self.resolve(layer, i).1.actions().any(Action::is_shift))
     }
 
-    /// Where `ch` lives: base layer first, unshifted before shifted.
+    /// Where `ch` lives: base layer first, then taps before holds/double taps/tap-holds,
+    /// unshifted before shifted.
     pub fn find_char(&self, ch: char) -> Option<Hint> {
         for (layer, l) in self.layers.iter().enumerate() {
-            for needs_shift in [false, true] {
-                for (key, k) in l.keys.iter().enumerate() {
-                    if layer > 0 && k.is_transparent() {
-                        continue;
+            for press in Press::ALL {
+                for needs_shift in [false, true] {
+                    for (key, k) in l.keys.iter().enumerate() {
+                        if layer > 0 && k.is_transparent() {
+                            continue;
+                        }
+                        let Some(action) = k.action(press) else { continue };
+                        if action.typed_char(needs_shift) != Some(ch) {
+                            continue;
+                        }
+                        // A shift-modified keycode (e.g. KC_EXLM) types the same thing either way.
+                        let needs_shift = needs_shift && action.typed_char(false) != Some(ch);
+                        return Some(Hint {
+                            layer,
+                            key,
+                            layer_key: if layer > 0 { self.layer_key(layer) } else { None },
+                            shift_key: if needs_shift { self.shift_key(layer) } else { None },
+                            needs_shift,
+                            press,
+                        });
                     }
-                    let Some(tap) = &k.tap else { continue };
-                    if tap.typed_char(needs_shift) != Some(ch) {
-                        continue;
-                    }
-                    // A shift-modified keycode (e.g. KC_EXLM) types the same thing either way.
-                    let needs_shift = needs_shift && tap.typed_char(false) != Some(ch);
-                    return Some(Hint {
-                        layer,
-                        key,
-                        layer_key: if layer > 0 { self.layer_key(layer) } else { None },
-                        shift_key: if needs_shift { self.shift_key(layer) } else { None },
-                        needs_shift,
-                    });
                 }
             }
         }
@@ -242,8 +311,11 @@ mod tests {
     fn sample() -> Layout {
         let mut base = vec![Key::default(); KEY_COUNT];
         base[13] = Key::tap("KC_N");
-        base[19] = Key { tap: Some(Action::new("KC_X")), hold: Some(Action { layer: Some(1), ..Action::new("MO") }), custom_label: None };
-        base[50] = Key { tap: Some(Action::new("KC_BSPC")), hold: Some(Action::new("KC_LEFT_SHIFT")), custom_label: None };
+        base[19] = Key { tap: Some(Action::new("KC_X")), hold: Some(Action { layer: Some(1), ..Action::new("MO") }), ..Default::default() };
+        base[50] = Key { tap: Some(Action::new("KC_BSPC")), hold: Some(Action::new("KC_LEFT_SHIFT")), ..Default::default() };
+        // Double tap J for escape; tap-then-hold K for '~'.
+        base[32] = Key { tap: Some(Action::new("KC_J")), double_tap: Some(Action::new("KC_ESCAPE")), ..Default::default() };
+        base[33] = Key { tap: Some(Action::new("KC_K")), tap_hold: Some(Action::new("KC_TILD")), ..Default::default() };
         base[51] = Key::tap("KC_SPACE");
         let mut sym = vec![Key::tap("KC_TRANSPARENT"); KEY_COUNT];
         sym[7] = Key::tap("KC_EXLM");
@@ -268,6 +340,18 @@ mod tests {
         let at = l.find_char('@').unwrap();
         assert_eq!((at.layer, at.key, at.shift_key), (1, 8, Some(50)));
         assert!(l.find_char('q').is_none());
+    }
+
+    #[test]
+    fn extra_actions() {
+        let l = sample();
+        let tilde = l.find_char('~').unwrap();
+        assert_eq!((tilde.key, tilde.press, tilde.needs_shift), (33, Press::TapHold, false));
+        assert_eq!(l.find_char('k').map(|h| h.press), Some(Press::Tap));
+        assert!(l.layers[0].keys[32].has_extra() && !l.layers[0].keys[13].has_extra());
+        // Extra actions keep a key from counting as transparent.
+        let k = Key { tap: Some(Action::new("KC_TRNS")), double_tap: Some(Action::new("KC_A")), ..Default::default() };
+        assert!(!k.is_transparent());
     }
 
     #[test]

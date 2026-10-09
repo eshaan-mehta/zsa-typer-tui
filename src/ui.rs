@@ -11,7 +11,7 @@ use ratatui::Frame;
 use crate::app::{find_setting, number_field, App, DeviceState, Editor, EditorPurpose, Screen, SettingsMenu, SETTINGS_ITEMS};
 use crate::board::{Board, HintRole, KeyVisual, Marker, Scale};
 use crate::geometry::KEY_COUNT;
-use crate::layout::Layout;
+use crate::layout::{Layout, Press};
 use crate::stats::MIN_SAMPLES;
 use crate::store::Mode;
 use crate::theme;
@@ -77,16 +77,16 @@ fn footer(app: &App, help: &str) -> Line<'static> {
 /// Key visuals for the live board: labels for the active layer, presses, and flashes.
 fn live_keys(app: &App, layout: Option<&Layout>, layer: usize) -> [KeyVisual; KEY_COUNT] {
     std::array::from_fn(|i| {
-        let (label, hold, dim) = match layout {
+        let (label, hold, dim, more) = match layout {
             Some(l) => {
                 let (from, k) = l.resolve(layer, i);
                 let label = k.label();
-                let dim = from != layer || (label.is_empty() && k.hold.is_none());
-                (label, k.hold_label(), dim)
+                let dim = from != layer || (label.is_empty() && k.hold.is_none() && !k.has_extra());
+                (label, k.hold_label(), dim, k.has_extra())
             }
-            None => (String::new(), None, true),
+            None => (String::new(), None, true, false),
         };
-        KeyVisual { label, hold, dim, pressed: app.held[i], flash: app.flash_on(i), ..Default::default() }
+        KeyVisual { label, hold, dim, more, pressed: app.held[i], flash: app.flash_on(i), ..Default::default() }
     })
 }
 
@@ -102,6 +102,10 @@ fn apply_hint(app: &App, layout: &Layout, layer: usize, keys: &mut [KeyVisual; K
     let Some(h) = app.test.next_char().and_then(|c| layout.find_char(c)) else { return };
     if h.layer == layer {
         keys[h.key].hint = Some(HintRole::Target);
+        // Not a plain tap: say how to press it where the hold label normally goes.
+        if h.press != Press::Tap {
+            keys[h.key].hold = Some(h.press.short().to_string());
+        }
     } else if let (0, Some(lk)) = (layer, h.layer_key) {
         keys[lk].hint = Some(HintRole::Hold);
     }
@@ -527,13 +531,25 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
         None => f.render_widget(center(Line::styled("make the terminal bigger to see your Voyager", dim())), board),
     }
 
+    // Every action on the selected key; while editing, the one being changed is highlighted.
     let sel = current.key(ed.layer, ed.selected).cloned().unwrap_or_default();
-    let mut info_spans = vec![
-        Span::styled("selected: ", dim()),
-        Span::styled(if sel.label().is_empty() { "(empty)".into() } else { sel.label() }, Style::new().bold()),
-    ];
-    if let Some(h) = sel.hold_label() {
-        info_spans.push(Span::styled(format!("   hold: {h}"), dim()));
+    let mut info_spans = vec![Span::styled("selected  ", dim())];
+    let mut first = true;
+    for press in Press::ALL {
+        let editing = ed.entry.is_some() && ed.slot == press;
+        let value = sel.action(press).map(|a| a.label()).filter(|l| !l.is_empty());
+        // Tap is always listed; the others only when set (or being edited).
+        if press != Press::Tap && value.is_none() && !editing {
+            continue;
+        }
+        if !first {
+            info_spans.push(Span::styled(" · ", dim()));
+        }
+        first = false;
+        let name_style = if editing { Style::new().fg(theme::ACCENT) } else { dim() };
+        info_spans.push(Span::styled(format!("{} ", press.name()), name_style));
+        let value_style = if editing { Style::new().fg(theme::ACCENT).bold() } else { Style::new().bold() };
+        info_spans.push(Span::styled(value.unwrap_or_else(|| "—".into()), value_style));
     }
     if ed.is_edited(ed.layer, ed.selected) {
         info_spans.push(Span::styled("   (edited)", Style::new().fg(theme::EDITED)));
@@ -543,9 +559,9 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
     if let Some(text) = &ed.entry {
         f.render_widget(
             center(Line::from(vec![
-                Span::styled("new value: ", dim()),
+                Span::styled(format!("new {}: ", ed.slot.name()), dim()),
                 Span::styled(format!("{text}▏"), Style::new().fg(theme::ACCENT)),
-                Span::styled("   a character (q, !) or keycode (left_shift, mo 1, none) · enter apply", dim()),
+                Span::styled("   a character or keycode (left_shift, mo 1, none) · tab other action · enter apply", dim()),
             ])),
             entry,
         );

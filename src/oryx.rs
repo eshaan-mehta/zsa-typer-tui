@@ -88,6 +88,8 @@ fn parse_key(k: &Value) -> Key {
     Key {
         tap: parse_action(&k["tap"]),
         hold: parse_action(&k["hold"]),
+        double_tap: parse_action(&k["doubleTap"]),
+        tap_hold: parse_action(&k["tapHold"]),
         custom_label: k["customLabel"].as_str().filter(|s| !s.is_empty()).map(String::from),
     }
 }
@@ -133,6 +135,18 @@ mod tests {
         assert_eq!(l.layers[0].keys[7].label(), "B");
         assert_eq!(l.layers[0].keys[51].hold.as_ref().and_then(Action::target_layer), Some(2));
         assert_eq!(l.find_char('e').map(|h| h.key), Some(41));
+    }
+
+    #[test]
+    fn parses_double_tap_and_tap_hold() {
+        let k = parse_key(&json!({
+            "tap": {"code": "KC_A"},
+            "hold": null,
+            "doubleTap": {"code": "KC_ESCAPE"},
+            "tapHold": {"code": "KC_TAB", "modifiers": {"leftCtrl": true}},
+        }));
+        assert_eq!(k.double_tap.map(|a| a.code), Some("KC_ESCAPE".to_string()));
+        assert_eq!(k.tap_hold.map(|a| a.mods), Some(vec!["ctrl".to_string()]));
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub struct KeyVisual {
     pub hint: Option<HintRole>,
     pub selected: bool,
     pub marker: Option<Marker>,
+    /// The key also has a double-tap or tap-then-hold action; shown as a small dot.
+    pub more: bool,
 }
 
 /// Key size in terminal cells. Keys in a column share their horizontal borders, so each
@@ -176,6 +178,12 @@ impl Widget for Board<'_> {
                 put(buf, x, y, &format!("╭{}╮", "─".repeat(inner)), base, base);
             }
             put(buf, x, y + 1, &format!("│{}│", center(&key.label, inner, ' ')), base, look(key).label);
+            if key.more {
+                let cell = &mut buf[(x + inner as u16, y + 1)];
+                if cell.symbol() == " " {
+                    cell.set_char('•').set_fg(Color::DarkGray);
+                }
+            }
             let (l, r) = if stacked(i, 1.0) { ('├', '┤') } else { ('╰', '╯') };
             let hold = key.hold.as_deref().unwrap_or("");
             put(buf, x, y + 2, &format!("{l}{}{r}", center(hold, inner, '─')), base, hold_text);

@@ -14,7 +14,7 @@ use crate::device::{self, DeviceEvent};
 use crate::generator::Generator;
 use crate::geometry::{self, KEY_COUNT};
 use crate::keycode;
-use crate::layout::{Action, Edit, Key, Layout};
+use crate::layout::{Action, Edit, Key, Layout, Press};
 use crate::oryx;
 use crate::stats::{Progression, Stats, Targets};
 use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE};
@@ -118,6 +118,8 @@ pub struct Editor {
     pub selected: usize,
     /// Text being typed for the selected key, while editing it.
     pub entry: Option<String>,
+    /// Which of the key's actions the entry changes (tab cycles while editing).
+    pub slot: Press,
     pub message: Option<String>,
 }
 
@@ -136,6 +138,13 @@ impl Editor {
         if self.base.key(layer, key) != Some(&value) {
             self.edits.push(Edit { layer, key, value });
         }
+    }
+
+    /// Change one of the selected key's actions (None clears it).
+    fn set_action(&mut self, slot: Press, value: Option<Action>) {
+        let mut key = self.current().key(self.layer, self.selected).cloned().unwrap_or_default();
+        *key.action_mut(slot) = value;
+        self.set(key);
     }
 
     fn restore(&mut self) {
@@ -391,6 +400,7 @@ impl App {
             layer: 0,
             selected: 0,
             entry: None,
+            slot: Press::Tap,
             message: None,
         }
     }
@@ -757,12 +767,18 @@ impl App {
         if let Some(entry) = &mut ed.entry {
             match key.code {
                 KeyCode::Esc => ed.entry = None,
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let n = Press::ALL.len();
+                    let i = Press::ALL.iter().position(|p| *p == ed.slot).unwrap_or(0);
+                    let next = if key.code == KeyCode::Tab { (i + 1) % n } else { (i + n - 1) % n };
+                    ed.slot = Press::ALL[next];
+                }
                 KeyCode::Enter => {
                     let text = std::mem::take(entry);
                     ed.entry = None;
-                    match parse_entry(&text) {
+                    match parse_action(&text) {
                         Some(value) => {
-                            ed.set(value);
+                            ed.set_action(ed.slot, value);
                             ed.message = None;
                         }
                         None if text.is_empty() => {}
@@ -786,7 +802,10 @@ impl App {
             KeyCode::Down => ed.selected = geometry::neighbor(ed.selected, 0, 1),
             KeyCode::Tab => ed.layer = (ed.layer + 1) % layers,
             KeyCode::BackTab => ed.layer = (ed.layer + layers - 1) % layers,
-            KeyCode::Enter => ed.entry = Some(String::new()),
+            KeyCode::Enter => {
+                ed.entry = Some(String::new());
+                ed.slot = Press::Tap;
+            }
             KeyCode::Delete | KeyCode::Backspace => ed.restore(),
             KeyCode::Char('s') if ctrl => self.confirm_editor(),
             KeyCode::Esc => self.cancel_editor(),
@@ -839,30 +858,32 @@ impl App {
     }
 }
 
-/// Parse what the user typed for a key in the editor: a single character it should type,
-/// or a QMK keycode name ("left_shift", "MO 1", "none", ...).
-fn parse_entry(text: &str) -> Option<Key> {
+/// Parse what the user typed for one of a key's actions in the editor: a single character it
+/// should type, a QMK keycode name ("left_shift", "MO 1", ...), or "none" to clear it.
+/// Returns None if it can't be understood.
+fn parse_action(text: &str) -> Option<Option<Action>> {
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
-        return keycode::code_for_char(c).map(Key::tap);
+        return keycode::code_for_char(c).map(|code| Some(Action::new(code)));
     }
     let t = text.trim().to_ascii_uppercase();
     if t.is_empty() {
         return None;
     }
     if t == "NONE" || t == "NO" {
-        return Some(Key::default());
+        return Some(None);
     }
     for prefix in ["MO", "TG", "TO", "OSL", "TT", "DF"] {
         if let Some(rest) = t.strip_prefix(prefix)
-            && let Ok(layer) = rest.trim().parse::<u8>() {
-                return Some(Key { tap: Some(Action { layer: Some(layer), ..Action::new(prefix) }), ..Default::default() });
-            }
+            && let Ok(layer) = rest.trim().parse::<u8>()
+        {
+            return Some(Some(Action { layer: Some(layer), ..Action::new(prefix) }));
+        }
     }
     let code = if t.starts_with("KC_") || t.starts_with("QK_") || t.starts_with("RGB") { t } else { format!("KC_{t}") };
     let known = keycode::label(&code);
     // Unknown names fall back to showing the first few letters; accept anything that isn't empty.
-    (!known.is_empty() || keycode::is_transparent(&code)).then(|| Key::tap(code))
+    (!known.is_empty() || keycode::is_transparent(&code)).then(|| Some(Action::new(code)))
 }
 
 #[cfg(test)]
@@ -887,13 +908,37 @@ mod tests {
 
     #[test]
     fn entries() {
-        assert_eq!(parse_entry("left_shift"), Some(Key::tap("KC_LEFT_SHIFT")));
-        assert_eq!(parse_entry("mo 2").and_then(|k| k.tap).and_then(|a| a.target_layer()), Some(2));
-        assert_eq!(parse_entry("none"), Some(Key::default()));
-        assert_eq!(parse_entry("trns"), Some(Key::tap("KC_TRNS")));
-        assert_eq!(parse_entry(""), None);
-        assert_eq!(parse_entry("q"), Some(Key::tap("KC_Q")));
-        assert_eq!(parse_entry(" "), Some(Key::tap("KC_SPACE")));
-        assert_eq!(parse_entry("!"), Some(Key::tap("KC_EXLM")));
+        let code = |s: &str| parse_action(s).map(|a| a.map(|a| a.code));
+        assert_eq!(code("left_shift"), Some(Some("KC_LEFT_SHIFT".into())));
+        assert_eq!(parse_action("mo 2").flatten().and_then(|a| a.target_layer()), Some(2));
+        assert_eq!(parse_action("none"), Some(None));
+        assert_eq!(code("trns"), Some(Some("KC_TRNS".into())));
+        assert_eq!(parse_action(""), None);
+        assert_eq!(code("q"), Some(Some("KC_Q".into())));
+        assert_eq!(code(" "), Some(Some("KC_SPACE".into())));
+        assert_eq!(code("!"), Some(Some("KC_EXLM".into())));
+    }
+
+    #[test]
+    fn editing_one_action_keeps_the_others() {
+        let mut base = Layout::empty("a", "b");
+        base.layers[0].keys[13] = Key::tap("KC_N");
+        let mut ed = Editor {
+            purpose: EditorPurpose::Edit,
+            base,
+            edits: Vec::new(),
+            previous: None,
+            layer: 0,
+            selected: 13,
+            entry: None,
+            slot: Press::Tap,
+            message: None,
+        };
+        ed.set_action(Press::DoubleTap, parse_action("esc").flatten());
+        let k = ed.current().key(0, 13).cloned().unwrap();
+        assert_eq!(k.tap.map(|a| a.code), Some("KC_N".into()));
+        assert_eq!(k.double_tap.map(|a| a.code), Some("KC_ESC".into()));
+        ed.set_action(Press::DoubleTap, None);
+        assert!(!ed.is_edited(0, 13), "clearing the only change leaves no edit");
     }
 }
