@@ -2,6 +2,11 @@
 name = "zsa-typer-tui"
 version = "0.1.0"
 edition = "2024"
+description = "A minimalistic TUI typing test for the ZSA Voyager"
+license = "MIT"
+repository = "https://github.com/eshaan-mehta/zsa-typer-tui"
+keywords = ["typing", "keyboard", "zsa", "voyager", "tui"]
+categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
 anyhow = "1.0.104"
