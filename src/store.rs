@@ -32,11 +32,36 @@ impl Mode {
     }
 }
 
+/// The shape of the typing cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorStyle {
+    /// A thin bar before the next letter.
+    Line,
+    /// A box over the next letter.
+    Block,
+    /// A line under the next letter.
+    Underscore,
+}
+
+impl CursorStyle {
+    pub const ALL: [CursorStyle; 3] = [CursorStyle::Line, CursorStyle::Block, CursorStyle::Underscore];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CursorStyle::Line => "line",
+            CursorStyle::Block => "block",
+            CursorStyle::Underscore => "underscore",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub mode: Mode,
     pub hints: bool,
+    pub cursor: CursorStyle,
     /// End the test on the first wrong key.
     pub instant_death: bool,
     pub word_count: usize,
@@ -57,6 +82,7 @@ impl Default for Settings {
         Settings {
             mode: Mode::Progressive,
             hints: true,
+            cursor: CursorStyle::Underscore,
             instant_death: false,
             word_count: 25,
             target_wpm: 30,

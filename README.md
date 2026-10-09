@@ -32,13 +32,17 @@ wrong, and (optionally) what to press next.
 - **Hints.** Optionally outline the next key to press, plus the shift or layer key to hold for it.
 - **Progressive mode.** Learn your layout a few letters at a time. You start with whatever letters sit under
   your resting fingers on *your* layout; new letters unlock (easiest-to-reach and most useful first) once every
-  current letter meets your speed and accuracy targets. Early stages mix real words with pronounceable
-  letter combinations when your letters can't spell enough words yet.
+  current letter is learned. A letter is learned once you beat your targets on it (10% faster, and 20% fewer
+  misses than allowed), and stays learned until you fall well under them (below 80% of the speed, or 10
+  points under the accuracy), so one slip doesn't undo it. Each new letter needs a little more practice than
+  the one before. Early stages mix real words with pronounceable letter combinations when your letters can't
+  spell enough words yet.
 - **Weak keys mode.** Words weighted toward the letters you're slowest or least accurate on.
 - **Words mode.** Random common English words.
 - **Instant death.** Optional: the first wrong key ends the test.
 - **Results graph.** WPM (with per-second raw) or accuracy over the course of the test, with mistakes marked;
-  step through it second by second to read the exact values.
+  step through it second by second to read the exact values, or expand it to fill the screen for finer
+  detail. Lines are drawn in braille dots, four to a character's height.
 - Works without the board too: if no Voyager is connected you get a plain typing test (and a note that your
   Voyager is missing).
 
@@ -47,7 +51,7 @@ wrong, and (optionally) what to press next.
 - A ZSA Voyager running a layout made in [Oryx](https://configure.zsa.io) (for automatic layout loading).
   Layouts compiled elsewhere still work: enter your keys in the built-in editor.
 - Rust (stable).
-- A terminal at least 80 columns wide and ~30 lines tall to see the board.
+- A terminal at least 80 columns wide and 31 lines tall to see the board.
 - Developed and tested on macOS. On Linux, reading the board needs ZSA's udev rules
   ([setup guide](https://github.com/zsa/wally/wiki/Linux-install)).
 
@@ -65,7 +69,7 @@ After that it only fetches again when you flash a new revision.
 | Where | Keys |
 | --- | --- |
 | Typing | type to start · `tab` new test · `esc` settings · `ctrl+w` / `alt+backspace` delete word · `ctrl+c` quit |
-| Results | `tab` / `enter` next test · `r` retry same text · `←→` / `h l` move the graph cursor (`home` / `end` jump) · `↑↓` / `j k` switch wpm / accuracy graph · `esc` settings · `q` quit |
+| Results | `tab` / `enter` next test · `r` retry same text · `←→` / `h l` move the graph cursor (`home` / `end` jump) · `↑↓` / `j k` switch wpm / accuracy graph · `e` expand the graph to the whole screen (`e` / `esc` to shrink) · `esc` settings · `q` quit |
 | Settings | `↑↓` / `j k` move · type a setting's name to jump to it · `enter` change · `←→` adjust · `esc` close |
 | Layout editor | arrows or press a key on the board to select · `enter` change key · `del` undo change · `tab` next layer · `ctrl+s` save · `esc` cancel |
 
@@ -81,6 +85,7 @@ the key's bottom border says how to press it (`hold`, `2×`, `t+hld`).
 | --- | --- |
 | Mode | progressive / weak keys / words |
 | Hints | outline the next key on the board |
+| Cursor | line / block / underscore (uses your terminal's cursor, so its color comes from your terminal theme) |
 | Instant death | end the test on the first mistake |
 | Words | words per test (5–500) |
 | Word list | path to your own word file (words separated by spaces or new lines); empty for the built-in words |

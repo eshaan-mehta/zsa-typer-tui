@@ -41,6 +41,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut terminal = ratatui::init();
     let result = app::App::new().run(&mut terminal);
+    // Give back the terminal's own cursor shape (the app sets one from the Cursor setting).
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), ratatui::crossterm::cursor::SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     result
 }

@@ -18,12 +18,19 @@ use crate::layout::{Layout, Press};
 use crate::stats::MIN_SAMPLES;
 use crate::store::Mode;
 use crate::theme;
+use crate::typing::TypingTest;
 
 const TEXT_WIDTH: u16 = 72;
 const TEXT_LINES: usize = 3;
 
 fn dim() -> Style {
     Style::new().fg(Color::DarkGray)
+}
+
+/// Text still to type: the dim gray, faded further by the terminal (toward its own
+/// background), so it stands well apart from typed text in light and dark themes.
+fn untyped() -> Style {
+    dim().add_modifier(Modifier::DIM)
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -71,16 +78,19 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 /// Lines at the bottom of every screen: a notice (when there is one), then the actions.
+/// Screens with a second line of actions need one more.
 const BOTTOM_H: u16 = 2;
 
 /// The bottom of every screen: notices on their own line, and the keys you can press on the
-/// last line, so actions are always in the same place.
-fn draw_bottom(f: &mut Frame, app: &App, area: Rect, actions: &str) {
-    let [notice, keys] = Split::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+/// last line(s), so actions are always in the same place.
+fn draw_bottom(f: &mut Frame, app: &App, area: Rect, actions: &[&str]) {
+    let [notice, keys] =
+        Split::vertical([Constraint::Length(1), Constraint::Length(actions.len() as u16)]).areas(area);
     if let Some(n) = app.notice() {
         f.render_widget(Paragraph::new(Line::styled(n.to_string(), Style::new().fg(theme::ACCENT))).alignment(Alignment::Center), notice);
     }
-    f.render_widget(Paragraph::new(Line::styled(actions.to_string(), dim())).alignment(Alignment::Center), keys);
+    let lines: Vec<Line> = actions.iter().map(|a| Line::styled(a.to_string(), dim())).collect();
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), keys);
 }
 
 /// What can be pressed in the settings menu right now.
@@ -160,13 +170,14 @@ fn wrap(target: &[char], width: usize) -> Vec<Range<usize>> {
     lines
 }
 
-fn text_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-    let t = &app.test;
+/// The visible lines of the test, and where the cursor is in them (row, column).
+fn text_lines(t: &TypingTest, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
     let lines = wrap(&t.target, width);
     let cursor = t.input.len();
     let current = lines.iter().position(|r| r.contains(&cursor)).unwrap_or(lines.len().saturating_sub(1));
     let first = current.saturating_sub(1).min(lines.len().saturating_sub(TEXT_LINES));
-    lines
+    let col = lines.get(current).map_or(0, |r| cursor.saturating_sub(r.start));
+    let shown = lines
         .iter()
         .skip(first)
         .take(TEXT_LINES)
@@ -181,33 +192,48 @@ fn text_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                             let shown = if expected == ' ' { '·' } else { expected };
                             Span::styled(shown.to_string(), Style::new().fg(theme::MISTAKE))
                         }
-                        None if i == cursor => {
-                            Span::styled(expected.to_string(), dim().add_modifier(Modifier::UNDERLINED))
-                        }
-                        None => Span::styled(expected.to_string(), dim()),
+                        None => Span::styled(expected.to_string(), untyped()),
                     }
                 })
                 .collect();
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    (shown, ((current - first) as u16, col as u16))
 }
 
 /// How far the board sits above an even split of the space under the text.
 const BOARD_LIFT: u16 = 6;
 
 /// Space left for the board after the fixed rows on the typing screen.
-const TYPING_CHROME: u16 = 1 + 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + 1 + 1 + BOTTOM_H;
+const TYPING_CHROME: u16 = 1 + 1 + 1 + 1 + TEXT_GAP + TEXT_LINES as u16 + PROGRESS_H + 1 + 1 + 1 + BOTTOM_H;
 
-/// What the current mode is working on: the letter strip in progressive mode, weak letters otherwise.
+/// Blank lines between the info lines and the text to type.
+const TEXT_GAP: u16 = 3;
+
+/// The progress bar, right under the text's rows (the text rarely fills all of them, so
+/// there's usually space above it).
+const PROGRESS_H: u16 = 1;
+
+/// How far through the text you are: a thin line under it that fills in as you type.
+fn progress_line(t: &TypingTest, width: usize) -> Line<'static> {
+    let done = (t.input.len() * width).checked_div(t.target.len()).unwrap_or(0).min(width);
+    Line::from(vec![
+        Span::styled("━".repeat(done), Style::new().fg(theme::ACCENT)),
+        Span::styled("─".repeat(width - done), untyped()),
+    ])
+}
+
+/// What the current mode is working on: the letter strip in progressive mode, the weakest
+/// letters in weak keys mode. (The line under it names the mode, so this doesn't.)
 fn mode_line(app: &App) -> Line<'static> {
     let s = &app.store.saved.settings;
     let target = s.targets();
     if app.mode_needs_layout() {
-        return Line::styled(format!("{} mode needs your layout (connect your Voyager once) · using words", s.mode.name()), dim());
+        return Line::styled("needs your layout (connect your Voyager once) · using words for now", dim());
     }
     match s.mode {
-        Mode::Words => Line::styled("words", dim()),
+        Mode::Words => Line::default(),
         Mode::Progressive => {
             let Some(p) = &app.progression else { return Line::default() };
             let focus = app.stats.focus(target);
@@ -215,7 +241,7 @@ fn mode_line(app: &App) -> Line<'static> {
             for c in &p.order {
                 let style = if !app.stats.unlocked.contains(c) {
                     dim()
-                } else if app.stats.letter(*c).meets(target) {
+                } else if app.stats.letter(*c).learned {
                     Style::new().fg(theme::CORRECT)
                 } else {
                     Style::new().fg(Color::Reset)
@@ -233,15 +259,12 @@ fn mode_line(app: &App) -> Line<'static> {
             let weak = app.stats.weakest(3, target);
             let has_data = app.stats.letters.values().any(|l| l.samples >= MIN_SAMPLES);
             if weak.is_empty() && has_data {
-                Line::styled(
-                    format!("weak keys · all letters meet your targets ({} wpm, {}%)", s.target_wpm, s.target_accuracy),
-                    dim(),
-                )
+                Line::styled(format!("all letters meet your targets ({} wpm, {}%)", s.target_wpm, s.target_accuracy), dim())
             } else if weak.is_empty() {
-                Line::styled("weak keys · not enough data yet, keep typing", dim())
+                Line::styled("not enough data yet, keep typing", dim())
             } else {
                 let letters = weak.iter().map(char::to_string).collect::<Vec<_>>().join("  ");
-                Line::from(vec![Span::styled("weak keys  ", dim()), Span::styled(letters, Style::new().fg(theme::MISTAKE).bold())])
+                Line::from(vec![Span::styled("weakest  ", dim()), Span::styled(letters, Style::new().fg(theme::MISTAKE).bold())])
             }
         }
     }
@@ -259,20 +282,21 @@ fn draw_typing(f: &mut Frame, app: &App, actions: &str) {
     // Spare height: half above the text; the rest goes between the text and the board and
     // below the board, with the board lifted BOARD_LIFT lines off where a 5:3 split would
     // put it. Keeps the test clearly separated without pinning the keyboard to the bottom.
-    let fixed = 1 + 1 + 1 + 2 + TEXT_LINES as u16 + 1 + board_h + 1 + BOTTOM_H;
+    let fixed = 1 + 1 + 1 + TEXT_GAP + TEXT_LINES as u16 + PROGRESS_H + 1 + board_h + 1 + BOTTOM_H;
     let spare = area.height.saturating_sub(fixed);
     let above_text = spare / 2;
     // (Rounded, and always leaving a line between the text and the board.)
     let below_board = ((spare * 3 + 8) / 16 + BOARD_LIFT).min((spare - above_text).saturating_sub(1));
     let above_board = spare - above_text - below_board;
-    let [status, _, mode, stats, _, text, _, caption, board, _, foot, _] = Split::vertical([
+    let [status, _, mode, stats, _, text, progress, _, caption, board, _, foot, _] = Split::vertical([
         Constraint::Length(1),
         Constraint::Length(above_text),
         Constraint::Length(1),
         Constraint::Length(1),
         // Gap so the text to type stands on its own below the info lines.
-        Constraint::Length(2),
+        Constraint::Length(TEXT_GAP),
         Constraint::Length(TEXT_LINES as u16),
+        Constraint::Length(PROGRESS_H),
         Constraint::Length(above_board),
         Constraint::Length(1),
         Constraint::Length(board_h),
@@ -305,7 +329,15 @@ fn draw_typing(f: &mut Frame, app: &App, actions: &str) {
         f.render_widget(Paragraph::new(mode_line(app)), centered(mode, text_w + 1));
     }
     f.render_widget(Paragraph::new(Line::styled(stats_text, dim())), centered(stats, text_w + 1));
-    f.render_widget(Paragraph::new(text_lines(app, text_w as usize)), text_area);
+    let (lines, (row, col)) = text_lines(t, text_w as usize);
+    f.render_widget(Paragraph::new(lines), text_area);
+    // The terminal's cursor, shaped by the Cursor setting. Hidden while settings are open.
+    if matches!(app.screen, Screen::Typing) && row < text_area.height && col < text_area.width {
+        f.set_cursor_position((text_area.x + col, text_area.y + row));
+    }
+    // Lined up under the text, as wide as it wraps.
+    let bar_area = Rect { y: progress.bottom().saturating_sub(1), height: progress.height.min(1), ..text_area };
+    f.render_widget(Paragraph::new(progress_line(t, text_w.min(bar_area.width) as usize)), bar_area);
 
     if show_board {
         let layer = app.shown_layer();
@@ -333,7 +365,7 @@ fn draw_typing(f: &mut Frame, app: &App, actions: &str) {
         }
     }
 
-    draw_bottom(f, app, foot, actions);
+    draw_bottom(f, app, foot, &[actions]);
 }
 
 /// Height of the results graph, including its axis labels.
@@ -344,8 +376,23 @@ const CHART_MAX_W: u16 = 100;
 fn draw_results(f: &mut Frame, app: &App, view: &ResultsView) {
     let area = f.area();
     let t = &app.test;
+    if view.expanded {
+        // Just the graph, as big as the screen.
+        let [_, chart_head, chart, _, foot] = Split::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(BOTTOM_H + 1),
+        ])
+        .areas(area);
+        let chart_w = area.width.saturating_sub(4);
+        draw_chart(f, view, centered(chart_head, chart_w), centered(chart, chart_w));
+        draw_bottom(f, app, foot, &["←→/hl inspect · ↑↓/jk wpm/accuracy · e/esc shrink", "tab next test · r retry · q quit"]);
+        return;
+    }
     // Status, summary, gap, graph header, graph, gap, footer; the board only if it still fits.
-    let fixed = 1 + 7 + 1 + 1 + CHART_H + 1 + 1 + BOTTOM_H;
+    let fixed = 1 + 7 + 1 + 1 + CHART_H + 1 + 1 + BOTTOM_H + 1;
     let show_board = app.device.is_connected() && app.layout.is_some();
     let scale = if show_board { Scale::fit(area.width, area.height.saturating_sub(fixed + 2)) } else { None };
 
@@ -358,7 +405,7 @@ fn draw_results(f: &mut Frame, app: &App, view: &ResultsView) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(CHART_H),
-        Constraint::Length(BOTTOM_H),
+        Constraint::Length(BOTTOM_H + 1),
         Constraint::Length(1),
         Constraint::Length(scale.map_or(0, |s| s.height())),
         Constraint::Fill(1),
@@ -428,7 +475,8 @@ fn draw_results(f: &mut Frame, app: &App, view: &ResultsView) {
         f.render_widget(Board { keys: &keys, scale }, board);
     }
 
-    draw_bottom(f, app, foot, "tab next test · r retry · ←→/hl inspect · ↑↓/jk wpm/accuracy · esc settings · q quit");
+    // The graph's keys first, then everything else.
+    draw_bottom(f, app, foot, &["←→/hl inspect · ↑↓/jk wpm/accuracy · e expand", "tab next test · r retry · esc settings · q quit"]);
 }
 
 /// The results graph: running wpm and per-second raw (or running accuracy), red dots where
@@ -473,80 +521,124 @@ fn draw_chart(f: &mut Frame, view: &ResultsView, head: Rect, area: Rect) {
     spans.push(Span::styled(cur.errors.to_string(), if cur.errors > 0 { errors_style.bold() } else { Style::new().bold() }));
     f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), head);
 
-    // Series for the chosen graph, and its y range.
+    // The plot fills the area down to the x axis and its labels; taller plots get finer ticks.
+    let axis_y = area.bottom().saturating_sub(2);
+    if axis_y <= area.top() + 2 {
+        return;
+    }
+    let height = axis_y - area.top();
+    let wanted_ticks = (height / ROWS_PER_TICK).max(2) as usize;
+
+    // Series for the chosen graph, and its y range, rounded out to whole ticks.
     let main: Vec<(f64, f64)> = tl
         .iter()
         .map(|s| (s.t, if view.chart == ChartView::Wpm { s.wpm } else { s.accuracy }))
         .collect();
     let raw: Vec<(f64, f64)> = tl.iter().map(|s| (s.t, s.raw)).collect();
-    let (y0, y1) = match view.chart {
+    let (y0, y1, y_step) = match view.chart {
         ChartView::Wpm => {
-            let top = tl.iter().map(|s| s.wpm.max(s.raw)).fold(0.0, f64::max);
-            (0.0, ((top * 1.1 / 10.0).ceil() * 10.0).max(10.0))
+            let top = tl.iter().map(|s| s.wpm.max(s.raw)).fold(10.0, f64::max) * 1.05;
+            let step = nice_step(top, wanted_ticks);
+            (0.0, (top / step).ceil() * step, step)
         }
         ChartView::Accuracy => {
             let low = tl.iter().map(|s| s.accuracy).fold(100.0, f64::min);
-            (((low / 10.0).floor() * 10.0).min(90.0), 100.0)
+            let step = nice_step((100.0 - low).max(10.0), wanted_ticks);
+            (((low / step).floor() * step).min(90.0), 100.0, step)
         }
     };
+    let y_ticks: Vec<f64> =
+        (0..).map(|i| y0 + i as f64 * y_step).take_while(|v| *v <= y1 + y_step / 1000.0).collect();
+    let fmt_y = |v: f64| if view.chart == ChartView::Accuracy { format!("{}%", fmt_num(v)) } else { fmt_num(v) };
     let (x0, x1) = (tl[0].t, tl[tl.len() - 1].t);
-    let fmt_y = |v: f64| if view.chart == ChartView::Accuracy { format!("{v:.0}%") } else { format!("{v:.0}") };
-    let y_labels = [fmt_y(y1), fmt_y((y0 + y1) / 2.0), fmt_y(y0)];
 
     // Axes: y labels, then a left axis and a bottom axis with x labels under it.
     let buf = f.buffer_mut();
-    let label_w = y_labels.iter().map(|l| l.chars().count()).max().unwrap_or(1) as u16;
+    let label_w = y_ticks.iter().map(|v| fmt_y(*v).chars().count()).max().unwrap_or(1) as u16;
     let axis_x = area.left() + label_w + 1;
-    let axis_y = area.bottom().saturating_sub(2);
-    if axis_x + 4 >= area.right() || axis_y <= area.top() + 2 {
+    if axis_x + 4 >= area.right() {
         return;
     }
-    let plot = Plot {
-        left: axis_x + 1,
-        top: area.top(),
-        width: area.right() - axis_x - 1,
-        height: axis_y - area.top(),
-        x: (x0, x1),
-        y: (y0, y1),
-    };
+    let plot = Plot { left: axis_x + 1, top: area.top(), width: area.right() - axis_x - 1, height, x: (x0, x1), y: (y0, y1) };
     let axis = dim();
     for y in plot.top..axis_y {
         buf[(axis_x, y)].set_char('│').set_style(axis);
     }
     buf[(axis_x, axis_y)].set_char('└').set_style(axis);
-    for x in axis_x + 1..area.right() {
+    for x in plot.left..area.right() {
         buf[(x, axis_y)].set_char('─').set_style(axis);
     }
-    let mid_row = plot.top + (plot.height - 1) / 2;
-    for (label, row) in y_labels.iter().zip([plot.top, mid_row, plot.top + plot.height - 1]) {
-        let x = axis_x - 1 - label.chars().count() as u16;
-        buf.set_string(x, row, label, axis);
+    // Each y tick: a label, a mark on the axis, and a faint gridline across (not at the bottom,
+    // which the x axis already marks).
+    for &v in &y_ticks {
+        let (row, label) = (plot.row(v), fmt_y(v));
+        buf.set_string(axis_x - 1 - label.chars().count() as u16, row, &label, axis);
+        buf[(axis_x, row)].set_char('┤');
+        if v > y0 {
+            for x in plot.left..area.right() {
+                buf[(x, row)].set_char('┈').set_style(untyped());
+            }
+        }
     }
-    let x_labels = [fmt_secs(x0), fmt_secs((x0 + x1) / 2.0), fmt_secs(x1)];
+    // X labels: the test's length at the right end, then round times wherever they fit.
     let label_row = axis_y + 1;
-    buf.set_string(plot.left, label_row, &x_labels[0], axis);
-    let mid = &x_labels[1];
-    buf.set_string(plot.left + plot.width / 2 - mid.chars().count() as u16 / 2, label_row, mid, axis);
-    let last = &x_labels[2];
-    buf.set_string(area.right() - last.chars().count() as u16, label_row, last, axis);
+    let end = fmt_secs(x1);
+    let end_x = area.right() - end.chars().count() as u16;
+    buf.set_string(end_x, label_row, &end, axis);
+    let x_step = nice_step(x1 - x0, (plot.width / COLS_PER_X_TICK).max(1) as usize);
+    let mut free_from = plot.left;
+    for t in (0..).map(|i| i as f64 * x_step).skip_while(|t| *t < x0).take_while(|t| *t <= x1) {
+        let (col, label) = (plot.col(t), fmt_secs(t));
+        let w = label.chars().count() as u16;
+        let start = col.saturating_sub(w / 2).max(plot.left);
+        if start < free_from || start + w + 1 > end_x {
+            continue;
+        }
+        buf.set_string(start, label_row, &label, axis);
+        buf[(col, axis_y)].set_char('┬');
+        free_from = start + w + 1;
+    }
 
     // Cursor first so the lines cross over it, then raw under the main line, then mistakes.
     let cursor_col = plot.col(cur.t);
     for y in plot.top..plot.top + plot.height {
         buf[(cursor_col, y)].set_char('│').set_style(Style::new().fg(theme::MISTAKE));
     }
-    if view.chart == ChartView::Wpm {
-        plot.draw_line(buf, &raw, raw_style);
+    match view.chart {
+        ChartView::Wpm => plot.draw_lines(buf, &[(&raw, raw_style), (&main, accent)]),
+        ChartView::Accuracy => plot.draw_lines(buf, &[(&main, accent)]),
     }
-    plot.draw_line(buf, &main, accent);
     for s in tl.iter().filter(|s| s.errors > 0) {
         let v = if view.chart == ChartView::Wpm { s.wpm } else { s.accuracy };
         buf[(plot.col(s.t), plot.row(v))].set_char('×').set_style(errors_style.bold());
     }
 }
 
-/// Where a graph's data goes on screen. Lines are drawn with box-drawing characters so
-/// they're exactly as thin as the axes.
+/// Rows between y ticks (at least), and columns between x ticks.
+const ROWS_PER_TICK: u16 = 3;
+const COLS_PER_X_TICK: u16 = 10;
+
+/// A round step for axis ticks (1, 2 or 5 times a power of ten, or 25, 250, ...) that splits
+/// `span` into at most about `n` parts.
+fn nice_step(span: f64, n: usize) -> f64 {
+    let rough = span / n.max(1) as f64;
+    if rough.is_nan() || rough <= 0.0 {
+        return 1.0;
+    }
+    let magnitude = 10f64.powf(rough.log10().floor());
+    [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .filter(|m| *m != 2.5 || magnitude >= 10.0)
+        .map(|m| m * magnitude)
+        .find(|step| *step >= rough)
+        .unwrap_or(10.0 * magnitude)
+}
+
+/// Braille dot bits by (row, column) within a character.
+const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+/// Where a graph's data goes on screen. Lines are drawn in braille dots, 2 across and 4 down
+/// in each character, so they show four times the detail of a character per row.
 struct Plot {
     left: u16,
     top: u16,
@@ -557,45 +649,71 @@ struct Plot {
 }
 
 impl Plot {
-    fn col(&self, t: f64) -> u16 {
+    fn dots_w(&self) -> usize {
+        self.width as usize * 2
+    }
+
+    fn dots_h(&self) -> usize {
+        self.height as usize * 4
+    }
+
+    /// Dot column for time `t`.
+    fn dot_x(&self, t: f64) -> usize {
         let frac = ((t - self.x.0) / (self.x.1 - self.x.0)).clamp(0.0, 1.0);
-        self.left + (frac * (self.width - 1) as f64).round() as u16
+        (frac * (self.dots_w() - 1) as f64).round() as usize
+    }
+
+    /// Dot row for value `v`, counting from the top.
+    fn dot_y(&self, v: f64) -> usize {
+        let frac = ((v - self.y.0) / (self.y.1 - self.y.0)).clamp(0.0, 1.0);
+        let bottom = self.dots_h() - 1;
+        bottom - (frac * bottom as f64).round() as usize
+    }
+
+    fn col(&self, t: f64) -> u16 {
+        self.left + (self.dot_x(t) / 2) as u16
     }
 
     fn row(&self, v: f64) -> u16 {
-        let frac = ((v - self.y.0) / (self.y.1 - self.y.0)).clamp(0.0, 1.0);
-        self.top + self.height - 1 - (frac * (self.height - 1) as f64).round() as u16
+        self.top + (self.dot_y(v) / 4) as u16
     }
 
-    fn t_at(&self, col: u16) -> f64 {
-        self.x.0 + (col - self.left) as f64 / (self.width - 1).max(1) as f64 * (self.x.1 - self.x.0)
-    }
-
-    /// A line through `points` (sorted by x): one row per column, with corners where it steps.
-    fn draw_line(&self, buf: &mut ratatui::buffer::Buffer, points: &[(f64, f64)], style: Style) {
-        let mut prev: Option<u16> = None;
-        for c in self.left..self.left + self.width {
-            let r = self.row(interpolate(points, self.t_at(c)));
-            let mut put = |y: u16, ch: char| {
-                buf[(c, y)].set_char(ch).set_style(style);
-            };
+    /// The dots of a line through `points` (sorted by x), as a braille pattern per character:
+    /// one dot per dot column, with steps split between the columns either side.
+    fn trace(&self, points: &[(f64, f64)]) -> Vec<u8> {
+        let w = self.width as usize;
+        let mut cells = vec![0u8; w * self.height as usize];
+        let mut set = |x: usize, y: usize| cells[y / 4 * w + x / 2] |= BRAILLE[y % 4][x % 2];
+        let mut prev: Option<usize> = None;
+        for x in 0..self.dots_w() {
+            let t = self.x.0 + x as f64 / (self.dots_w() - 1) as f64 * (self.x.1 - self.x.0);
+            let y = self.dot_y(interpolate(points, t));
             match prev {
-                Some(p) if p != r => {
-                    for y in p.min(r) + 1..p.max(r) {
-                        put(y, '│');
+                Some(p) => {
+                    let mid = (p + y) / 2;
+                    for yy in p.min(mid)..=p.max(mid) {
+                        set(x - 1, yy);
                     }
-                    // Arriving from the left on row p, leaving to the right on row r.
-                    if r > p {
-                        put(p, '╮');
-                        put(r, '╰');
-                    } else {
-                        put(p, '╯');
-                        put(r, '╭');
+                    for yy in mid.min(y)..=mid.max(y) {
+                        set(x, yy);
                     }
                 }
-                _ => put(r, '─'),
+                None => set(x, y),
             }
-            prev = Some(r);
+            prev = Some(y);
+        }
+        cells
+    }
+
+    /// Lines through each series, later ones on top. A character shows only the topmost line
+    /// through it, so crossing lines don't smear into each other's color.
+    fn draw_lines(&self, buf: &mut ratatui::buffer::Buffer, series: &[(&[(f64, f64)], Style)]) {
+        let traced: Vec<(Vec<u8>, Style)> = series.iter().map(|(points, style)| (self.trace(points), *style)).collect();
+        let w = self.width as usize;
+        for i in 0..w * self.height as usize {
+            let Some((dots, style)) = traced.iter().rev().find(|(dots, _)| dots[i] != 0) else { continue };
+            let ch = char::from_u32(0x2800 + u32::from(dots[i])).unwrap_or(' ');
+            buf[(self.left + (i % w) as u16, self.top + (i / w) as u16)].set_char(ch).set_style(*style);
         }
     }
 }
@@ -615,10 +733,15 @@ fn interpolate(points: &[(f64, f64)], x: f64) -> f64 {
     points.last().map_or(0.0, |p| p.1)
 }
 
+/// A number to one decimal, without a trailing ".0" (so "4", "6.9").
+fn fmt_num(v: f64) -> String {
+    let r = (v * 10.0).round() / 10.0;
+    if r.fract() == 0.0 { format!("{r:.0}") } else { format!("{r:.1}") }
+}
+
 /// Seconds to one decimal, without a trailing ".0" (so "4s", "6.9s").
 fn fmt_secs(v: f64) -> String {
-    let r = (v * 10.0).round() / 10.0;
-    if r.fract() == 0.0 { format!("{r:.0}s") } else { format!("{r:.1}s") }
+    format!("{}s", fmt_num(v))
 }
 
 fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
@@ -665,6 +788,7 @@ fn draw_settings(f: &mut Frame, app: &App, menu: &SettingsMenu) {
                 },
                 ("Mode", _) => s.mode.name().to_string(),
                 ("Hints", _) => if s.hints { "on" } else { "off" }.to_string(),
+                ("Cursor", _) => s.cursor.name().to_string(),
                 ("Instant death", _) => if s.instant_death { "on" } else { "off" }.to_string(),
                 ("Words" | "Target speed" | "Target accuracy", _) => format!("{}{unit}", app.number_value(name)),
                 _ => String::new(),
@@ -830,7 +954,7 @@ fn draw_editor(f: &mut Frame, app: &App, ed: &Editor) {
     } else {
         format!("arrows/press a key: select · enter change · del undo · tab layer · ctrl+s save · esc {cancel}")
     };
-    draw_bottom(f, app, foot, &actions);
+    draw_bottom(f, app, foot, &[&actions]);
 }
 
 fn centered(area: Rect, width: u16) -> Rect {
@@ -843,18 +967,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plot_lines_are_box_drawing() {
-        let area = Rect::new(0, 0, 12, 6);
+    fn plot_lines_are_braille_dots() {
+        let area = Rect::new(0, 0, 6, 2);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        let plot = Plot { left: 0, top: 0, width: 12, height: 6, x: (0.0, 11.0), y: (0.0, 5.0) };
-        // Flat at 0, then a step up to 5 halfway.
-        plot.draw_line(&mut buf, &[(0.0, 0.0), (5.0, 0.0), (6.0, 5.0), (11.0, 5.0)], Style::new());
-        let rows: Vec<String> =
-            (0..6).map(|y| (0..12).map(|x| buf[(x, y)].symbol().chars().next().unwrap()).collect()).collect();
-        assert_eq!(rows[5], "──────╯     ");
-        assert_eq!(rows[0], "      ╭─────");
-        assert!(rows[1..5].iter().all(|r| r.chars().nth(6) == Some('│')));
+        // 12 dots across (one per time unit) and 8 down (one per value unit).
+        let plot = Plot { left: 0, top: 0, width: 6, height: 2, x: (0.0, 11.0), y: (0.0, 7.0) };
+        // Flat at 0, then a step up to 7 halfway: the step is split over the dots either side.
+        plot.draw_lines(&mut buf, &[(&[(0.0, 0.0), (5.0, 0.0), (6.0, 7.0), (11.0, 7.0)], Style::new())]);
+        let rows: Vec<String> = (0..2).map(|y| (0..6).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        assert_eq!(rows[0], "  ⢀⡏⠉⠉");
+        assert_eq!(rows[1], "⣀⣀⣸   ");
         assert_eq!(interpolate(&[(0.0, 0.0), (2.0, 10.0)], 1.0), 5.0);
+    }
+
+    #[test]
+    fn round_tick_steps() {
+        assert_eq!(nice_step(73.5, 3), 25.0);
+        assert_eq!(nice_step(73.5, 12), 10.0);
+        assert_eq!(nice_step(10.0, 4), 5.0, "no 2.5% accuracy ticks");
+        assert_eq!(nice_step(23.2, 9), 5.0);
+        assert_eq!(nice_step(0.0, 3), 1.0);
     }
 
     #[test]
@@ -871,5 +1003,28 @@ mod tests {
         assert_eq!(lines, vec!["the quick ", "brown fox"]);
         let long: Vec<char> = "abcdefghijkl".chars().collect();
         assert_eq!(wrap(&long, 5), vec![0..5, 5..10, 10..12]);
+    }
+
+    #[test]
+    fn progress_fills_as_you_type() {
+        let mut t = TypingTest::from_text("abcd");
+        let filled = |t: &TypingTest| progress_line(t, 8).spans[0].content.chars().count();
+        assert_eq!(filled(&t), 0);
+        t.type_char('a');
+        t.type_char('x');
+        assert_eq!(filled(&t), 4, "mistakes still move you along");
+        assert_eq!(progress_line(&t, 8).width(), 8);
+        assert_eq!(progress_line(&TypingTest::from_text(""), 8).width(), 8);
+    }
+
+    #[test]
+    fn cursor_follows_the_wrapped_text() {
+        let mut t = TypingTest::from_text("the quick brown fox");
+        assert_eq!(text_lines(&t, 10).1, (0, 0));
+        for c in "the quick b".chars() {
+            t.type_char(c);
+        }
+        // "the quick " fills the first line, so the next letter is the second on line two.
+        assert_eq!(text_lines(&t, 10).1, (1, 1));
     }
 }

@@ -6,7 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
 
 use crate::board::Flash;
@@ -17,13 +19,14 @@ use crate::keycode;
 use crate::layout::{Action, Edit, Key, Layout, Press};
 use crate::oryx;
 use crate::stats::{Progression, Stats, Targets};
-use crate::store::{LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE, WORD_COUNT_RANGE};
+use crate::store::{CursorStyle, LayoutRef, Mode, Store, TARGET_ACCURACY_RANGE, TARGET_WPM_RANGE, WORD_COUNT_RANGE};
 use crate::typing::{Second, TypingTest};
 use crate::ui;
 
-pub const SETTINGS_ITEMS: [&str; 11] = [
+pub const SETTINGS_ITEMS: [&str; 12] = [
     "Mode",
     "Hints",
+    "Cursor",
     "Instant death",
     "Words",
     "Word list",
@@ -51,6 +54,22 @@ pub fn number_field(item: &str) -> Option<(std::ops::RangeInclusive<u32>, u32)> 
         "Target speed" => Some((TARGET_WPM_RANGE, 5)),
         "Target accuracy" => Some((TARGET_ACCURACY_RANGE, 1)),
         _ => None,
+    }
+}
+
+/// The value after (or before) `current` in `all`, wrapping around.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
+    let n = all.len();
+    let i = all.iter().position(|v| *v == current).unwrap_or(0);
+    all[if forward { (i + 1) % n } else { (i + n - 1) % n }]
+}
+
+/// The terminal cursor shape for a cursor setting. Steady, since blinking while typing distracts.
+fn cursor_shape(style: CursorStyle) -> SetCursorStyle {
+    match style {
+        CursorStyle::Line => SetCursorStyle::SteadyBar,
+        CursorStyle::Block => SetCursorStyle::SteadyBlock,
+        CursorStyle::Underscore => SetCursorStyle::SteadyUnderScore,
     }
 }
 
@@ -193,12 +212,14 @@ pub struct ResultsView {
     /// Index into `timeline` the cursor is on.
     pub cursor: usize,
     pub timeline: Vec<Second>,
+    /// The graph fills the screen (no summary or keyboard).
+    pub expanded: bool,
 }
 
 impl ResultsView {
     fn new(timeline: Vec<Second>) -> Self {
         let cursor = timeline.len().saturating_sub(1);
-        ResultsView { chart: ChartView::Wpm, cursor, timeline }
+        ResultsView { chart: ChartView::Wpm, cursor, timeline, expanded: false }
     }
 }
 
@@ -292,10 +313,17 @@ impl App {
     }
 
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let mut shape = None;
         while !self.should_quit {
             self.drain_device();
             self.drain_fetch();
             self.tick();
+            // The typing cursor is the terminal's own, so a line cursor can sit between letters.
+            let cursor = self.store.saved.settings.cursor;
+            if shape != Some(cursor) {
+                execute!(terminal.backend_mut(), cursor_shape(cursor))?;
+                shape = Some(cursor);
+            }
             terminal.draw(|f| ui::draw(f, &self))?;
             if event::poll(Duration::from_millis(16))?
                 && let Event::Key(key) = event::read()?
@@ -543,14 +571,13 @@ impl App {
 
     fn finish_test(&mut self) {
         self.screen = Screen::Results(ResultsView::new(self.test.timeline()));
-        let Some(layout) = &self.layout else { return };
+        let t = self.targets();
+        let (Some(layout), Some(p)) = (&self.layout, &self.progression) else { return };
         self.stats.record(&self.test.keystrokes_log, layout);
+        self.stats.update_learned(p, t);
         // A failed (instant death) test still counts toward letter stats, but never unlocks.
-        if self.store.saved.settings.mode == Mode::Progressive
-            && !self.test.is_failed()
-            && let Some(p) = &self.progression
-        {
-            self.just_unlocked = self.stats.maybe_unlock(p, self.targets());
+        if self.store.saved.settings.mode == Mode::Progressive && !self.test.is_failed() {
+            self.just_unlocked = self.stats.maybe_unlock(p);
         }
         self.save_stats();
     }
@@ -570,6 +597,7 @@ impl App {
         self.stats.sync_layout(layout);
         let p = Progression::for_layout(layout);
         self.stats.ensure_started(&p);
+        self.stats.update_learned(&p, self.store.saved.settings.targets());
         self.progression = Some(p);
         self.save_stats();
     }
@@ -634,11 +662,13 @@ impl App {
                     ChartView::Accuracy => ChartView::Wpm,
                 };
             }
+            KeyCode::Char('e') => view.expanded = !view.expanded,
             KeyCode::Tab | KeyCode::Enter => self.new_test(),
             KeyCode::Char('r') => {
                 self.test = self.test.restart();
                 self.screen = Screen::Typing;
             }
+            KeyCode::Esc if view.expanded => view.expanded = false,
             KeyCode::Esc => self.screen = Screen::Settings(SettingsMenu::default()),
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
@@ -796,15 +826,18 @@ impl App {
         match item {
             "Mode" => {
                 let s = &mut self.store.saved.settings;
-                let i = Mode::ALL.iter().position(|m| *m == s.mode).unwrap_or(0);
-                let n = Mode::ALL.len();
-                s.mode = Mode::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }];
+                s.mode = cycle(&Mode::ALL, s.mode, forward);
                 self.persist();
                 self.test = self.make_test();
             }
             "Hints" => {
                 let s = &mut self.store.saved.settings;
                 s.hints = !s.hints;
+                self.persist();
+            }
+            "Cursor" => {
+                let s = &mut self.store.saved.settings;
+                s.cursor = cycle(&CursorStyle::ALL, s.cursor, forward);
                 self.persist();
             }
             "Instant death" => {
@@ -831,7 +864,7 @@ impl App {
             return;
         }
         match item {
-            "Mode" | "Hints" | "Instant death" => self.adjust_setting(item, true),
+            "Mode" | "Hints" | "Cursor" | "Instant death" => self.adjust_setting(item, true),
             "Reset progress" => {
                 self.stats = Stats::default();
                 self.on_layout_changed();
@@ -1013,6 +1046,7 @@ mod tests {
         assert_eq!(name("q"), Some("Quit"));
         assert_eq!(name("inst"), Some("Instant death"));
         assert_eq!(name("death"), Some("Instant death"));
+        assert_eq!(name("cur"), Some("Cursor"));
         assert_eq!(name("word l"), Some("Word list"));
         assert_eq!(name("list"), Some("Word list"));
         assert_eq!(name("xyz"), None);

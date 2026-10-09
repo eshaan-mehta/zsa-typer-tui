@@ -15,12 +15,36 @@ use crate::typing::Keystroke;
 const ALPHA: f64 = 0.1;
 /// Samples a letter needs before its numbers are trusted.
 pub const MIN_SAMPLES: u32 = 10;
+/// Extra samples each newly unlocked letter needs, over the letter unlocked before it.
+const PRACTICE_STEP: u32 = 2;
+/// To become learned, a letter has to beat the targets: this much faster...
+const LEARN_SPEED: f64 = 1.1;
+/// ...with at most this share of the misses the accuracy target allows.
+const LEARN_MISSES: f64 = 0.8;
+/// Once learned, it stays learned until it falls under this share of the target speed...
+const STAY_SPEED: f64 = 0.8;
+/// ...or this far under the target accuracy. A miss costs a letter about 10 points of
+/// running accuracy, so one slip doesn't unlearn it; a couple close together do.
+const STAY_ACCURACY_DROP: f64 = 0.1;
+
 /// What a letter needs to count as learned (both set in settings).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Targets {
     pub wpm: f64,
     /// 0..1
     pub accuracy: f64,
+}
+
+impl Targets {
+    /// What a letter has to reach to become learned.
+    pub fn to_learn(self) -> Targets {
+        Targets { wpm: self.wpm * LEARN_SPEED, accuracy: 1.0 - (1.0 - self.accuracy) * LEARN_MISSES }
+    }
+
+    /// What a learned letter has to stay at to remain learned.
+    pub fn to_stay(self) -> Targets {
+        Targets { wpm: self.wpm * STAY_SPEED, accuracy: self.accuracy - STAY_ACCURACY_DROP }
+    }
 }
 /// Pauses longer than this aren't counted as typing speed.
 const MAX_INTERVAL_MS: f64 = 2000.0;
@@ -91,6 +115,13 @@ impl Progression {
         start.extend(rest);
         Progression { order: start, start_len }
     }
+
+    /// Samples a letter needs before it can count as learned: MIN_SAMPLES for the starting
+    /// letters, and a little more for each letter unlocked after them.
+    pub fn practice_needed(&self, c: char) -> u32 {
+        let unlocks = self.order.iter().position(|o| *o == c).map_or(0, |i| (i + 1).saturating_sub(self.start_len));
+        MIN_SAMPLES + PRACTICE_STEP * unlocks as u32
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -102,6 +133,10 @@ pub struct LetterStats {
     pub accuracy: Option<f64>,
     /// (layer, key) the letter was on when these stats were collected.
     pub key: Option<(usize, usize)>,
+    /// Whether it counts as learned. Changes only after tests, and has some slack either way
+    /// (`Targets::to_learn`, `Targets::to_stay`) so it doesn't flip back and forth.
+    #[serde(default)]
+    pub learned: bool,
 }
 
 impl LetterStats {
@@ -118,10 +153,18 @@ impl LetterStats {
         }
     }
 
-    pub fn meets(&self, t: Targets) -> bool {
-        self.samples >= MIN_SAMPLES
-            && self.wpm().is_some_and(|w| w >= t.wpm)
-            && self.accuracy.is_some_and(|a| a >= t.accuracy)
+    fn reaches(&self, t: Targets) -> bool {
+        self.wpm().is_some_and(|w| w >= t.wpm) && self.accuracy.is_some_and(|a| a >= t.accuracy)
+    }
+
+    /// Learning a letter takes enough practice and beating the targets; losing it takes
+    /// falling well under them.
+    fn update_learned(&mut self, t: Targets, practice: u32) {
+        self.learned = if self.learned {
+            self.reaches(t.to_stay())
+        } else {
+            self.samples >= practice && self.reaches(t.to_learn())
+        };
     }
 
     /// 0 (needs work) to 1 (at target), counting low sample counts as unproven.
@@ -185,9 +228,16 @@ impl Stats {
         }
     }
 
-    /// Unlock the next letter if every unlocked letter is at target. Returns it.
-    pub fn maybe_unlock(&mut self, p: &Progression, t: Targets) -> Option<char> {
-        if !self.unlocked.iter().all(|c| self.letter(*c).meets(t)) {
+    /// After a test: work out which letters count as learned now.
+    pub fn update_learned(&mut self, p: &Progression, t: Targets) {
+        for (c, s) in self.letters.iter_mut() {
+            s.update_learned(t, p.practice_needed(*c));
+        }
+    }
+
+    /// Unlock the next letter if every unlocked letter is learned. Returns it.
+    pub fn maybe_unlock(&mut self, p: &Progression) -> Option<char> {
+        if !self.unlocked.iter().all(|c| self.letter(*c).learned) {
             return None;
         }
         let next = *p.order.iter().find(|c| !self.unlocked.contains(c))?;
@@ -195,12 +245,14 @@ impl Stats {
         Some(next)
     }
 
-    /// The unlocked letter that most needs practice.
+    /// The unlocked letter that most needs practice: of the ones not learned yet (they hold
+    /// back the next unlock), the furthest from learning it.
     pub fn focus(&self, t: Targets) -> Option<char> {
-        self.unlocked
-            .iter()
-            .copied()
-            .min_by(|a, b| self.letter(*a).skill(t).total_cmp(&self.letter(*b).skill(t)))
+        let learn = t.to_learn();
+        self.unlocked.iter().copied().min_by(|a, b| {
+            let (a, b) = (self.letter(*a), self.letter(*b));
+            a.learned.cmp(&b.learned).then(a.skill(learn).total_cmp(&b.skill(learn)))
+        })
     }
 
     /// The `n` weakest letters with enough data to judge.
@@ -271,16 +323,68 @@ mod tests {
         s.sync_layout(&layout);
         s.ensure_started(&p);
         let t = Targets { wpm: 30.0, accuracy: 0.95 };
-        assert_eq!(s.maybe_unlock(&p, t), None);
+        assert_eq!(s.maybe_unlock(&p), None);
         let fast = Keystroke { expected: 'x', correct: true, interval: Some(Duration::from_millis(200)), at: Duration::ZERO };
-        let ks: Vec<Keystroke> = s
-            .unlocked
-            .iter()
-            .flat_map(|c| std::iter::repeat_n(Keystroke { expected: *c, ..fast.clone() }, MIN_SAMPLES as usize))
-            .collect();
+        let practice = |c: char, n: u32| vec![Keystroke { expected: c, ..fast.clone() }; n as usize];
+        let ks: Vec<Keystroke> = s.unlocked.iter().flat_map(|c| practice(*c, MIN_SAMPLES)).collect();
         s.record(&ks, &layout);
-        assert_eq!(s.maybe_unlock(&p, t), Some('o'));
-        assert_eq!(s.maybe_unlock(&p, t), None, "'o' has no practice yet");
+        s.update_learned(&p, t);
+        assert_eq!(s.maybe_unlock(&p), Some('o'));
+        assert_eq!(s.maybe_unlock(&p), None, "'o' has no practice yet");
+        // A newly unlocked letter needs a bit more practice than the starting ones.
+        s.record(&practice('o', MIN_SAMPLES), &layout);
+        s.update_learned(&p, t);
+        assert_eq!(s.maybe_unlock(&p), None);
+        s.record(&practice('o', PRACTICE_STEP), &layout);
+        s.update_learned(&p, t);
+        assert!(s.maybe_unlock(&p).is_some());
+    }
+
+    #[test]
+    fn each_unlock_needs_more_practice() {
+        let p = Progression::for_layout(&gallium());
+        assert_eq!(p.practice_needed(p.order[0]), MIN_SAMPLES);
+        assert_eq!(p.practice_needed(p.order[p.start_len - 1]), MIN_SAMPLES);
+        assert_eq!(p.practice_needed(p.order[p.start_len]), MIN_SAMPLES + PRACTICE_STEP);
+        assert_eq!(p.practice_needed(p.order[p.start_len + 1]), MIN_SAMPLES + 2 * PRACTICE_STEP);
+    }
+
+    #[test]
+    fn learning_has_slack_both_ways() {
+        let t = Targets { wpm: 30.0, accuracy: 0.95 };
+        let after = |wpm: f64, accuracy: f64, learned: bool| {
+            let mut s = LetterStats { samples: 50, avg_ms: Some(12_000.0 / wpm), accuracy: Some(accuracy), key: None, learned };
+            s.update_learned(t, MIN_SAMPLES);
+            s.learned
+        };
+        assert!(!after(31.0, 1.0, false), "just over the speed target isn't enough to learn it");
+        assert!(!after(40.0, 0.955, false), "nor is just over the accuracy target");
+        assert!(after(34.0, 0.97, false));
+        assert!(after(26.0, 0.86, true), "a bit under the targets keeps it learned");
+        assert!(!after(23.0, 0.97, true), "well under the speed target loses it");
+        assert!(!after(40.0, 0.84, true), "as does well under the accuracy target");
+    }
+
+    #[test]
+    fn one_slip_doesnt_unlearn_a_letter() {
+        let layout = gallium();
+        let p = Progression::for_layout(&layout);
+        let t = Targets { wpm: 30.0, accuracy: 0.95 };
+        let mut s = Stats::default();
+        s.sync_layout(&layout);
+        let hit = Keystroke { expected: 'e', correct: true, interval: Some(Duration::from_millis(250)), at: Duration::ZERO };
+        let miss = Keystroke { correct: false, ..hit.clone() };
+        s.record(&vec![hit.clone(); 30], &layout);
+        s.update_learned(&p, t);
+        assert!(s.letter('e').learned);
+        // A test that ends on a mistake keeps it learned...
+        s.record(&[vec![hit.clone(); 10], vec![miss.clone()]].concat(), &layout);
+        s.update_learned(&p, t);
+        assert!(s.letter('e').learned);
+        // ...but a second one right after doesn't.
+        s.record(&[hit, miss], &layout);
+        s.update_learned(&p, t);
+        assert!(!s.letter('e').learned);
     }
 
     #[test]
