@@ -71,7 +71,9 @@ impl Scale {
     fn y(self, units: f32) -> u16 {
         let row = units.floor();
         let stagger_steps = ((units - row) * 4.0).round();
-        row as u16 * ROW_H + stagger_steps as u16
+        // Thumb keys get their own top border instead of sharing the column's bottom one.
+        let thumb_gap = u16::from(row >= THUMB_ROW);
+        row as u16 * ROW_H + stagger_steps as u16 + thumb_gap
     }
 
     /// Widest keys that fit, if any.
@@ -83,10 +85,15 @@ impl Scale {
     }
 }
 
+/// Thumb keys are on key-unit row 4; they're drawn as separate boxes, never stacked.
+const THUMB_ROW: f32 = 4.0;
+
 /// Whether another key sits directly above (`dir` = -1) or below (+1) key `i` in its column.
 fn stacked(i: usize, dir: f32) -> bool {
     let g = KEYS[i];
-    KEYS.iter().any(|o| o.x == g.x && o.y.floor() == g.y.floor() + dir)
+    let row = g.y.floor();
+    row < THUMB_ROW
+        && KEYS.iter().any(|o| o.x == g.x && o.y.floor() == row + dir && o.y.floor() < THUMB_ROW)
 }
 
 fn is_box_char(ch: char) -> bool {
@@ -218,12 +225,12 @@ mod tests {
     #[test]
     fn scales() {
         assert_eq!(Scale { key_w: 7 }.width(), 112);
-        assert_eq!(Scale { key_w: 7 }.height(), 14);
+        assert_eq!(Scale { key_w: 7 }.height(), 15);
         assert_eq!(Scale::fit(120, 30).map(|s| s.key_w), Some(7));
         assert_eq!(Scale::fit(100, 30).map(|s| s.key_w), Some(6));
-        assert_eq!(Scale::fit(80, 14).map(|s| s.key_w), Some(5));
+        assert_eq!(Scale::fit(80, 15).map(|s| s.key_w), Some(5));
         assert!(Scale::fit(79, 30).is_none());
-        assert!(Scale::fit(120, 13).is_none());
+        assert!(Scale::fit(120, 14).is_none());
     }
 
     #[test]
@@ -233,9 +240,13 @@ mod tests {
             // Same column, next row down (left half rows are 6 keys apart).
             assert_eq!(s.y(b.y), s.y(a.y) + ROW_H);
         }
-        // The outer thumb key continues the column above it; the inner one sits a step lower.
-        assert!(stacked(24, -1.0) && stacked(51, -1.0));
-        assert!(!stacked(25, -1.0) && !stacked(50, -1.0));
+        // Thumb keys are separate boxes: the outer one starts right under its column's bottom
+        // border (not sharing it), and the inner one sits a step lower.
+        for t in [24, 25, 50, 51] {
+            assert!(!stacked(t, -1.0) && !stacked(t, 1.0));
+        }
+        assert!(!stacked(23, 1.0) && !stacked(44, 1.0));
+        assert_eq!(s.y(KEYS[24].y), s.y(KEYS[23].y) + KEY_H);
         assert_eq!(s.y(KEYS[25].y), s.y(KEYS[24].y) + 1);
     }
 
